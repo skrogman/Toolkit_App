@@ -29,13 +29,20 @@ Write-Host "`nConnecting to secure vault..." -ForegroundColor DarkGray
 # 2. Query the PRIVATE repo for available apps
 $apiUrl = "https://api.github.com/repos/$PrivateRepoOwner/$PrivateRepoName/contents?ref=$Branch"
 try {
-    $apiResponse = Invoke-RestMethod -Uri $apiUrl -Method Get -Headers $AuthHeader -UseBasicParsing
+    # 1. We add '-ErrorAction Stop' here so it fails silently and instantly jumps to the catch block
+    $appCode = Invoke-RestMethod -Uri $appRawUrl -Method Get -Headers $AuthHeader -UseBasicParsing -ErrorAction Stop
     
-    # Filter for directories that start with "App_"
-    $availableApps = $apiResponse | Where-Object { $_.type -eq "dir" -and $_.name -like "App_*" } | Select-Object -ExpandProperty name
+    $appScriptBlock = [scriptblock]::Create($appCode)
+    . $appScriptBlock -AuthHeader $AuthHeader -RepoOwner $PrivateRepoOwner -RepoName $PrivateRepoName -Branch $Branch -AppName $selectedApp
 } catch {
-    Write-Error "Access Denied: Invalid Key or Cannot reach the private repository."
-    return
+    # 2. We use Write-Host instead of Write-Error so it prints clean text
+    Write-Host "`n[X] ERROR: Failed to download $selectedApp's Entry.ps1." -ForegroundColor Red
+    Write-Host "GitHub says the file does not exist at this exact path:" -ForegroundColor Gray
+    Write-Host $appRawUrl -ForegroundColor Yellow
+    
+    # 3. This pauses the script so the window stays open for you to read it!
+    Read-Host "`nPress Enter to exit"
+    exit
 }
 
 if (-not $availableApps) {
