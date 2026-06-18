@@ -7,7 +7,7 @@ $PrivateRepoOwner = "skrogman" # <-- CHANGE THIS
 $PrivateRepoName  = "Toolkit_App"
 $Branch           = "main"
 
-Clear-Host
+#Clear-Host
 Write-Host "=============================================" -ForegroundColor Green
 Write-Host "         SECURE IR & ADMIN TOOLKIT           " -ForegroundColor Green
 Write-Host "=============================================" -ForegroundColor Green
