@@ -4,7 +4,7 @@
 # ====================================================================
 
 $PrivateRepoOwner = "skrogman" # <-- CHANGE THIS
-$PrivateRepoName  = "Powershell_Apps"
+$PrivateRepoName  = "Toolkit_App"
 $Branch           = "main"
 
 Clear-Host
