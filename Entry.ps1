@@ -3,14 +3,14 @@
 # ====================================================================
 
 $PrivateRepoOwner = "skrogman" 
-$PrivateRepoName  = "Toolkit_Modules" # UPDATED: Now targeting your private modules repo
+$PrivateRepoName  = "Toolkit_Modules" 
 $Branch           = "main"
 
 Write-Host "`n===========================================================" -ForegroundColor Green
 Write-Host "               SECURE IR & ADMIN TOOLKIT                   " -ForegroundColor Green
 Write-Host "===========================================================" -ForegroundColor Green
 
-# 1. Use the local PIN token if it exists, otherwise ask for it
+# 1. Use the local PIN token if it exists
 if ($global:DevToken) {
     Write-Host ">>> Local Toolkit PIN Detected. Bypassing manual entry..." -ForegroundColor DarkGray
     $PlainToken = $global:DevToken
@@ -43,8 +43,15 @@ try {
     exit
 }
 
-# 4. Filter for folders, ignoring hidden git/metadata directories
-$apps = $repoContents | Where-Object { $_.type -eq "dir" -and $_.name -notlike ".*" }
+# 4. Filter out files, leaving only root directories (e.g., BEC, Groom_PC, Onboard_PC)
+# Broadened the filter to capture anything that presents as a folder or directory structure
+$apps = $repoContents | Where-Object { $_.type -eq "dir" -or $_.type -eq "tree" -and $_.name -notlike ".*" }
+
+# DEBUGGING ASSISTANCE: If things go wrong, let's look under the hood
+if ($apps.Count -eq 0 -and $repoContents) {
+    Write-Host "`n[DEBUG] GitHub returned items, but none matched the folder filter." -ForegroundColor Yellow
+    Write-Host "Raw Item Types found: $(($repoContents | Select-Object -ExpandProperty type) -join ', ')" -ForegroundColor Gray
+}
 
 if ($apps.Count -eq 0) {
     Write-Host "`n[!] No applications found in the vault." -ForegroundColor Yellow
