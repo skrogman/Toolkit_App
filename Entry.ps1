@@ -1,95 +1,75 @@
-# ====================================================================
-# ENTRY.PS1 (Public Orchestrator & Menu System)
-# ====================================================================
+$ErrorActionPreference = 'Stop'
 
-$PrivateRepoOwner = "skrogman" 
-$PrivateRepoName  = "Toolkit_Modules" 
-$Branch           = "main"
+Clear-Host
+Write-Host '===========================================================' -ForegroundColor Cyan
+Write-Host '               SECURE IR & ADMIN TOOLKIT                   ' -ForegroundColor Green
+Write-Host '===========================================================' -ForegroundColor Cyan
+Write-Host ''
 
-Write-Host "`n===========================================================" -ForegroundColor Green
-Write-Host "               SECURE IR & ADMIN TOOLKIT                   " -ForegroundColor Green
-Write-Host "===========================================================" -ForegroundColor Green
+# 1. Inherit the Authentication Context from the Launcher
+$Token = $null
+if ($global:GitHubToken) { 
+    $Token = $global:GitHubToken 
+} elseif ($env:GITHUB_TOKEN) { 
+    $Token = $env:GITHUB_TOKEN 
+}
 
-# 1. Use the local PIN token if it exists
-if ($global:DevToken) {
-    Write-Host ">>> Local Toolkit PIN Detected. Bypassing manual entry..." -ForegroundColor DarkGray
-    $PlainToken = $global:DevToken
+if (-not $Token) {
+    Write-Host '[!] No identity token inherited from the launcher.' -ForegroundColor Yellow
+    Write-Host '    Public modules will load, but private vaults will return 404 Not Found.' -ForegroundColor DarkGray
 } else {
-    $SecureKey = Read-Host "Enter Toolkit Access Key (PAT)" -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureKey)
-    $PlainToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($BSTR)
+    Write-Host '[+] Secure session context inherited successfully.' -ForegroundColor Green
 }
 
-# 2. Build the authentication header
-$AuthHeader = @{
-    "Authorization" = "Bearer $PlainToken"
-    "Accept"        = "application/vnd.github.v3+json"
-    "X-GitHub-Api-Version" = "2022-11-28"
-}
+# 2. Configure Next-Stage Vault Connection
+# (Change these variables to point to your actual secondary module/script)
+$TargetOwner  = 'skrogman'
+$TargetRepo   = 'Toolkit_Modules' 
+$TargetBranch = 'main'
+$TargetFile   = 'Main.ps1' # <-- Update this if your next script is named something else!
 
-Write-Host "`nConnecting to secure vault..." -ForegroundColor Cyan
+Write-Host "Connecting to secure vault ($TargetRepo)..." -ForegroundColor Cyan
 
-# 3. Ask GitHub for the contents of the Private Vault
-$apiUrl = "https://api.github.com/repos/$PrivateRepoOwner/$PrivateRepoName/contents"
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $repoContents = Invoke-RestMethod -Uri $apiUrl -Method Get -Headers $AuthHeader -UseBasicParsing
-} catch {
-    Write-Host "`n[X] Access Denied or Repository Not Found." -ForegroundColor Red
-    Write-Host "Error Details: $_" -ForegroundColor Gray
-    Read-Host "`nPress Enter to exit"
-    exit
-}
-
-# 4. Filter out files, leaving only root directories (e.g., BEC, Groom_PC, Onboard_PC)
-# Broadened the filter to capture anything that presents as a folder or directory structure
-$apps = $repoContents | Where-Object { $_.type -eq "dir" -or $_.type -eq "tree" -and $_.name -notlike ".*" }
-
-# DEBUGGING ASSISTANCE: If things go wrong, let's look under the hood
-if ($apps.Count -eq 0 -and $repoContents) {
-    Write-Host "`n[DEBUG] GitHub returned items, but none matched the folder filter." -ForegroundColor Yellow
-    Write-Host "Raw Item Types found: $(($repoContents | Select-Object -ExpandProperty type) -join ', ')" -ForegroundColor Gray
-}
-
-if ($apps.Count -eq 0) {
-    Write-Host "`n[!] No applications found in the vault." -ForegroundColor Yellow
-    Read-Host "`nPress Enter to exit"
-    exit
-}
-
-# 5. Build the Dynamic Menu
-Write-Host "`nAvailable Toolkits:`n" -ForegroundColor White
-$i = 1
-foreach ($app in $apps) {
-    Write-Host "  [$i] $($app.name)" -ForegroundColor Cyan
-    $i++
-}
-
-# 6. Get User Selection
-Write-Host ""
-$selection = 0
-while ($selection -lt 1 -or $selection -gt $apps.Count) {
-    [int]$selection = Read-Host "Select a toolkit to load (1-$($apps.Count))"
-}
-
-$selectedApp = $apps[$selection - 1].name
-Write-Host "`n[+] Bootstrapping $selectedApp..." -ForegroundColor Green
-
-# 7. Download and Launch the selected app's internal Entry.ps1
-$appRawUrl = "https://raw.githubusercontent.com/$PrivateRepoOwner/$PrivateRepoName/$Branch/$selectedApp/Entry.ps1"
-
-try {
-    $appCode = Invoke-RestMethod -Uri $appRawUrl -Method Get -Headers $AuthHeader -UseBasicParsing -ErrorAction Stop
-    $appScriptBlock = [scriptblock]::Create($appCode)
+    # 3. Securely Fetch Payload
+    $WebClient = New-Object System.Net.WebClient
+    $WebClient.Headers.Add('User-Agent', 'PowerShellSecureLauncher')
+    $WebClient.Headers.Add('Accept', 'application/vnd.github.v3.raw')
     
-    # Execute the selected app's bootstrapper, passing the PAT header down
-    . $appScriptBlock -AuthHeader $AuthHeader -RepoOwner $PrivateRepoOwner -RepoName $PrivateRepoName -Branch $Branch -AppName $selectedApp
+    # Inject the inherited token into the web request
+    if ($Token) { 
+        $WebClient.Headers.Add('Authorization', "Bearer $Token") 
+    }
+    
+    $VaultUrl = "https://api.github.com/repos/$TargetOwner/$TargetRepo/contents/$TargetFile?ref=$TargetBranch"
+    
+    $Payload = $WebClient.DownloadString($VaultUrl)
+    
+    if ($Payload) {
+        Write-Host '[+] Vault payload retrieved successfully. Executing...' -ForegroundColor Green
+        Start-Sleep -Milliseconds 600
+        Clear-Host
+        
+        # 4. Execute the Main Toolkit Application
+        Invoke-Expression $Payload
+    }
 } catch {
-    Write-Host "`n[X] ERROR: Failed to download $selectedApp's Entry.ps1." -ForegroundColor Red
-    Write-Host "GitHub says the file does not exist at this exact path:" -ForegroundColor Gray
-    Write-Host $appRawUrl -ForegroundColor Yellow
-    Read-Host "`nPress Enter to exit"
+    # 5. Native Error Handling (Mirrors your previous screenshots)
+    Write-Host ''
+    Write-Host '[X] Access Denied or Repository Not Found.' -ForegroundColor Red
+    Write-Host "Endpoint: $VaultUrl" -ForegroundColor DarkGray
+    
+    if ($_.Exception.Response) {
+        $Reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+        $RawError = $Reader.ReadToEnd()
+        Write-Host "Error Details:`n$RawError" -ForegroundColor DarkGray
+    } else {
+        Write-Host "Error Details:`n$($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    
+    Write-Host "`nPress Enter to exit..." -ForegroundColor Yellow
+    Read-Host | Out-Null
     exit
 }
