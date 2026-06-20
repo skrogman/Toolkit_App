@@ -14,7 +14,6 @@ function Add-DiagnosticLog {
     $Formatted = "[$Timestamp] [$ScriptIdentity] [$Level] $Message"
     $script:SystemLogStream += $Formatted
     
-    # Also pass to fallback streams in case bootstrap is capturing them
     Write-Debug $Formatted -ErrorAction SilentlyContinue
     Write-Verbose $Formatted -ErrorAction SilentlyContinue
 }
@@ -25,12 +24,13 @@ Add-DiagnosticLog "Pipeline lifecycle initialized at $($OrchStartTime.ToString('
 $TokenSource = "None"
 $DiscoveredToken = $null
 
+# [BUGFIX] Using proper backticks to escape variable names to prevent secret leakage
 if ($global:GitHubToken) {
     $DiscoveredToken = $global:GitHubToken
-    $TokenSource = "Global Variable (\$global:GitHubToken)"
+    $TokenSource = "Global Variable (`$global:GitHubToken)"
 } elseif ($GitHubToken) {
     $DiscoveredToken = $GitHubToken
-    $TokenSource = "Local Variable (\$GitHubToken)"
+    $TokenSource = "Local Variable (`$GitHubToken)"
 } elseif ($env:GitHubToken) {
     $DiscoveredToken = $env:GitHubToken
     $TokenSource = "Environment Variable (env:GitHubToken)"
@@ -38,7 +38,6 @@ if ($global:GitHubToken) {
     $DiscoveredToken = $env:GITHUB_TOKEN
     $TokenSource = "Environment Variable (env:GITHUB_TOKEN)"
 } else {
-    # Deep memory scan for session tokens matching GitHub PAT layouts
     $SecretScan = Get-Variable | Where-Object { $_.Value -match '^(ghp_|github_pat_)' } | Select-Object -First 1
     if ($SecretScan) {
         $DiscoveredToken = $SecretScan.Value
@@ -49,16 +48,16 @@ if ($global:GitHubToken) {
 $AuthHeader = @{ 'User-Agent' = 'Secure-IR-Enclave' }
 if ($DiscoveredToken) {
     $AuthHeader.Add('Authorization', "Bearer $DiscoveredToken")
-    Add-DiagnosticLog "Identity token successfully recovered via $TokenSource."
+    # Masking the token length in logs just to be safe
+    Add-DiagnosticLog "Identity token recovered via $TokenSource (Length: $($DiscoveredToken.Length))."
 } else {
     Add-DiagnosticLog "CRITICAL: No identity token found across accessible scopes." "WARN"
 }
 
 # --- [3] BOOTSTRAP ENVIRONMENT INSPECTION ---
-# Scan for any custom functions or log paths exposed by the wrapper
 $DiscoveredLogUtils = Get-Command -Type Function | Where-Object { $_.Name -match 'log|debug|stream|write' } | Select-Object -ExpandProperty Name
 if ($DiscoveredLogUtils) {
-    Add-DiagnosticLog "Detected wrapper utilities in session context: ($($DiscoveredLogUtils -join ', '))."
+    Add-DiagnosticLog "Detected wrapper utilities in session: ($($DiscoveredLogUtils -join ', '))."
 }
 
 # --- [4] NETWORK COMMUNICATOR & AUTOMATIC HEALING ---
@@ -74,7 +73,6 @@ function Invoke-SafeGitHubRequest {
     return $WebClient.DownloadString($Url)
 }
 
-# Dynamic validation routine targeting name variations (Underscore vs Hyphen)
 $RepoOwner = "skrogman"
 $RepoNamingOptions = @("Toolkit_Modules", "toolkit-modules")
 $BranchOptions = @("main", "master")
@@ -119,14 +117,13 @@ while ($true) {
     Write-Host "            SECURE IR & ADMIN TOOLKIT             " -ForegroundColor Green
     Write-Host "==================================================" -ForegroundColor Green
     
-    # PERMANENT LIVE DIAGNOSTIC PANEL (Resilient to Clear-Host)
     Write-Host "--- SYSTEM RUNTIME LOG STREAM ---" -ForegroundColor DarkGray
     Write-Host " [*] Orchestrator Start : $($OrchStartTime.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor DarkGray
     Write-Host " [*] Active Token Source : $TokenSource" -ForegroundColor DarkGray
     Write-Host " [*] Active Target Path  : $RepoOwner/$ActiveRepoTarget ($ActiveBranchTarget)" -ForegroundColor DarkGray
     
-    # Print the last 4 major diagnostic events permanently to the screen
-    $LogSuffix = if ($SystemLogStream.Count -gt 4) { $SystemLogStream[-4..-1] } else { $SystemLogStream }
+    # [BUGFIX] Increased buffer to 8 lines so all repository API attempts remain visible
+    $LogSuffix = if ($SystemLogStream.Count -gt 8) { $SystemLogStream[-8..-1] } else { $SystemLogStream }
     foreach ($LogLine in $LogSuffix) {
         Write-Host "     $LogLine" -ForegroundColor DarkCyan
     }
@@ -147,7 +144,6 @@ while ($true) {
     Write-Host "$ExitOptionNumber. Exit Launcher Enclave"
     Write-Host ""
     
-    # Input Sanitization
     $SelectedNumber = 0
     $InputSelection = (Read-Host "Select an option (1-$ExitOptionNumber)").Trim()
     
@@ -175,10 +171,7 @@ while ($true) {
             
             if ([string]::IsNullOrWhiteSpace($ScriptContent)) { throw "Target endpoint payload returned empty data map." }
             
-            # Formulate the child execution script block
             $ScriptBlock = [ScriptBlock]::Create($ScriptContent)
-            
-            # Execute child payload inside current safe context container
             & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
             
             Add-DiagnosticLog "Module $TargetModule gracefully yielded control back to Orchestrator core."
