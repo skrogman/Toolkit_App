@@ -166,15 +166,22 @@ while ($true) {
             
             if ([string]::IsNullOrWhiteSpace($ScriptContent)) { throw "Target endpoint payload returned empty data map." }
             
-            $ScriptBlock = [ScriptBlock]::Create($ScriptContent)
+            # [FIXED] Parse the JSON envelope and decode the Base64 script content
+            $FileMeta = $ScriptContent | ConvertFrom-Json
+            if (-not $FileMeta.content) { throw "No base64 content property found in GitHub response." }
+            
+            $DecodedScript = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($FileMeta.content))
+            $ScriptBlock = [ScriptBlock]::Create($DecodedScript)
             
             # Execute child payload
             & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
             
             Add-DiagnosticLog "Module $TargetModule gracefully yielded control back to Orchestrator."
         } catch {
-            Add-DiagnosticLog "Fault identified inside dynamic payload thread: $($_.Exception.Message)" "ERROR"
-            Write-Host "[X] Dynamic Execution Faulted: $($_.Exception.Message)" -ForegroundColor Red
+            # [FIXED] Strip newlines from errors to prevent custom loggers from printing blank lines
+            $CleanError = $_.Exception.Message -replace "`r|`n", " | "
+            Add-DiagnosticLog "Fault identified inside dynamic payload thread: $CleanError" "ERROR"
+            Write-Host "`n[X] Dynamic Execution Faulted: $CleanError" -ForegroundColor Red
         }
         Read-Host "`nPress Enter to return to module selection..."
     }
