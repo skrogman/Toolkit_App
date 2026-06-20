@@ -174,7 +174,7 @@ while ($true) {
             $ScriptBlock = [ScriptBlock]::Create($DecodedScript)
             
             # Execute child payload
-            & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
+& $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $ActiveRepoTarget
             
             Add-DiagnosticLog "Module $TargetModule gracefully yielded control back to Orchestrator."
         } catch {
