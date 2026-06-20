@@ -9,25 +9,17 @@ $OrchStartTime  = Get-Date
 
 function Add-DiagnosticLog {
     param([string]$Message, [string]$Level = "INFO")
-    $Formatted = "[$($ScriptIdentity)] $Message"
+    $Formatted = "[$Level] [$ScriptIdentity] $Message"
     
-    # Best Practice: Detect custom bootstrap logger dynamically
     if (Get-Command "Log-Write" -ErrorAction SilentlyContinue) {
         try {
-            # Attempt standard named parameter syntax first
-            Log-Write -Message $Formatted -Level $Level -ErrorAction Stop
+            # Pass as a single, plain argument to prevent parameter binding issues
+            Log-Write $Formatted -ErrorAction Stop
         } catch {
-            try {
-                # Fallback to standard positional syntax
-                Log-Write $Formatted $Level -ErrorAction Stop
-            } catch {
-                # Absolute fallback if syntax completely mismatches
-                Write-Host "[$Level] $Formatted" -ForegroundColor DarkGray
-            }
+            Write-Host $Formatted -ForegroundColor DarkGray
         }
     } else {
-        # Fallback for standalone execution without the wrapper
-        Write-Host "[$Level] $Formatted" -ForegroundColor DarkGray
+        Write-Host $Formatted -ForegroundColor DarkGray
     }
 }
 
@@ -174,7 +166,7 @@ while ($true) {
             $ScriptBlock = [ScriptBlock]::Create($DecodedScript)
             
             # Execute child payload
-& $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $ActiveRepoTarget
+& $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $ActiveRepoTarget -Branch $ActiveBranchTarget
             
             Add-DiagnosticLog "Module $TargetModule gracefully yielded control back to Orchestrator."
         } catch {
