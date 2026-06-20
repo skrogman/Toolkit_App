@@ -14,9 +14,8 @@ if ($global:GitHubToken) {
     $AuthHeader.Add('Authorization', "Bearer $global:GitHubToken")
 }
 
-# 2. Dynamic Branch & Module Discovery
-$Branch = "main"
-$DiscoveryUrl = "https://api.github.com/repos/$RepoOwner/$ModulesRepo/contents/?ref=$Branch"
+# Track discovery errors to show the user if things fail
+$DiscoveryError = $null
 
 function Fetch-GitHubString {
     param([string]$Url, [string]$AcceptType = "application/vnd.github.v3+json")
@@ -29,15 +28,25 @@ function Fetch-GitHubString {
     return $WebClient.DownloadString($Url)
 }
 
-# Test 'main' branch, fallback to 'master' if we hit a 404
+# 2. Dynamic Branch & Module Discovery
+$Branch = "main"
+$DiscoveryUrl = "https://api.github.com/repos/$RepoOwner/$ModulesRepo/contents/?ref=$Branch"
+
 $RawJson = $null
 try {
     $RawJson = Fetch-GitHubString -Url $DiscoveryUrl
 } catch {
-    if ($_.Exception.Message -like "*404*") {
+    $DiscoveryError = $_.Exception.Message
+    # Fallback to master if main 404s
+    if ($DiscoveryError -like "*404*") {
         $Branch = "master"
         $DiscoveryUrl = "https://api.github.com/repos/$RepoOwner/$ModulesRepo/contents/?ref=$Branch"
-        try { $RawJson = Fetch-GitHubString -Url $DiscoveryUrl } catch {}
+        try { 
+            $RawJson = Fetch-GitHubString -Url $DiscoveryUrl 
+            $DiscoveryError = $null # Clear error if master succeeds
+        } catch {
+            $DiscoveryError = $_.Exception.Message
+        }
     }
 }
 
@@ -46,7 +55,9 @@ $DynamicModules = @()
 if ($RawJson) {
     try {
         $DynamicModules = $RawJson | ConvertFrom-Json | Where-Object { $_.type -eq 'dir' } | Select-Object -ExpandProperty name
-    } catch {}
+    } catch {
+        $DiscoveryError = "JSON Parsing Failed: $($_.Exception.Message)"
+    }
 }
 
 # 3. Persistent UI Operational Loop
@@ -62,7 +73,11 @@ while ($true) {
     Write-Host "--- DYNAMIC MODULE SELECTION ---" -ForegroundColor Yellow
     
     if ($DynamicModules.Count -eq 0) {
-        Write-Host "[X] Warning: No functional modules discovered or access denied." -ForegroundColor Warning
+        # FIXED: Changed 'Warning' to 'Yellow' to fix the ConsoleColor crash
+        Write-Host "[X] Warning: No functional modules discovered or access denied." -ForegroundColor Yellow
+        if ($DiscoveryError) {
+            Write-Host "    API Error Details: $DiscoveryError" -ForegroundColor Red
+        }
         Write-Host "    Verify token permissions for repository: $ModulesRepo" -ForegroundColor DarkGray
     } else {
         for ($i = 0; $i -lt $DynamicModules.Count; $i++) {
@@ -93,16 +108,11 @@ while ($true) {
         Write-Host "`n[+] Dispatching pipeline execution sequence for: $TargetModule..." -ForegroundColor Cyan
         
         try {
-            # Construct API raw string download target path pointing to subfolder Entry.ps1
             $ModuleUrl = "https://api.github.com/repos/$RepoOwner/$ModulesRepo/contents/$TargetModule/Entry.ps1?ref=$Branch"
-            
-            # CRITICAL: We pass the raw media type accept header to fetch content stream directly
             $ScriptContent = Fetch-GitHubString -Url $ModuleUrl -AcceptType "application/vnd.github.v3.raw"
             
             if ($ScriptContent) {
                 $ScriptBlock = [ScriptBlock]::Create($ScriptContent)
-                
-                # Execute module payload while piping down structural parameters
                 & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
             } else {
                 throw "Downloaded script block returned empty payload."
