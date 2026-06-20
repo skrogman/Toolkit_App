@@ -18,29 +18,65 @@ while ($true) {
     
     $Choice = (Read-Host "Select a module to load (1-4)").Trim()
 
+    # --- Pre-configure Network & Auth for Modules ---
+    $RepoOwner = "skrogman"
+    
+    $AuthHeader = @{
+        'User-Agent' = 'PowerShellSecureLauncher'
+        'Accept'     = 'application/vnd.github.v3.raw'
+    }
+    if ($global:GitHubToken) {
+        $AuthHeader.Add('Authorization', "Bearer $global:GitHubToken")
+    }
+
+    $WebClient = New-Object System.Net.WebClient
+    foreach ($Key in $AuthHeader.Keys) {
+        $WebClient.Headers.Add($Key, $AuthHeader[$Key])
+    }
+    # ------------------------------------------------
+
     switch ($Choice) {
         "1" {
             Write-Host "`n[+] Dispatching BEC module pipeline..." -ForegroundColor Cyan
-            # Insert your BEC module code execution here
-            Read-Host "Press Enter to return to module selection..."
+            try {
+                $ModuleUrl = "https://api.github.com/repos/$RepoOwner/Toolkit_Modules/contents/BEC/Entry.ps1?ref=main"
+                $Code = $WebClient.DownloadString($ModuleUrl)
+                $ScriptBlock = [ScriptBlock]::Create($Code)
+                
+                # Execute module and pass the required parameters
+                & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
+            } catch {
+                Write-Host "[X] Execution Failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+            Read-Host "`nPress Enter to return to module selection..."
         }
         "2" {
             Write-Host "`n[+] Dispatching Groom PC module pipeline..." -ForegroundColor Cyan
-            # Insert your Groom PC module code execution here
-            Read-Host "Press Enter to return to module selection..."
+            try {
+                $ModuleUrl = "https://api.github.com/repos/$RepoOwner/Toolkit_Modules/contents/Groom_PC/Entry.ps1?ref=main"
+                $Code = $WebClient.DownloadString($ModuleUrl)
+                $ScriptBlock = [ScriptBlock]::Create($Code)
+                & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
+            } catch {
+                Write-Host "[X] Execution Failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+            Read-Host "`nPress Enter to return to module selection..."
         }
         "3" {
             Write-Host "`n[+] Dispatching Onboard PC module pipeline..." -ForegroundColor Cyan
-            # Insert your Onboard PC module code execution here
-            Read-Host "Press Enter to return to module selection..."
+            try {
+                $ModuleUrl = "https://api.github.com/repos/$RepoOwner/Toolkit_Modules/contents/Onboard_PC/Entry.ps1?ref=main"
+                $Code = $WebClient.DownloadString($ModuleUrl)
+                $ScriptBlock = [ScriptBlock]::Create($Code)
+                & $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner
+            } catch {
+                Write-Host "[X] Execution Failed: $($_.Exception.Message)" -ForegroundColor Red
+            }
+            Read-Host "`nPress Enter to return to module selection..."
         }
         "4" {
             Write-Host "`n[-] Handing context control back to local initialization enclave..." -ForegroundColor Yellow
             Start-Sleep -Milliseconds 750
-            
-            # CRITICAL MECHANISM: 
-            # Using 'return' exits this script block payload cleanly, 
-            # allowing start-toolkit.cmd's wrapper loop to catch it.
             return 
         }
         Default {
