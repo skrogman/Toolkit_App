@@ -230,21 +230,100 @@ function Show-ConfigMenu {
         
         switch ($MenuChoice.Trim()) {
             "1" {
-                if (-not (Test-Path $ConfigFile)) { Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red; Start-Sleep -Seconds 2; continue }
-                $Cfg = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-                try {
-                    $Token = Get-DecodedToken -Config $Cfg
-                    
-                    # Ensure downstream payload gets Token variables inside debug as well
-                    $global:ToolkitAuthHeader = @{ "Authorization" = "Bearer $Token" }
-                    $env:GITHUB_TOKEN = $Token
-                    $global:GITHUB_TOKEN = $Token
-                    
-                    Invoke-DiagnosticsEngine -AuthHeader $global:ToolkitAuthHeader -Config $Cfg
-                } catch {
-                    Write-Host "`n[!] Authentication Blocked: $($_.Exception.Message)" -ForegroundColor Red
-                    Read-Host "Press [Enter] to return to menu"
+                if (-not (Test-Path $ConfigFile)) {
+                    Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red
+                    Start-Sleep -Seconds 2; continue
                 }
+                $Cfg       = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $DbgOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
+                $DbgRepo   = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
+                $DbgBranch = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
+                $DbgApp    = "Toolkit_App"
+                $TempPath  = Join-Path $env:TEMP "tk_debug_$(Get-Random).ps1"
+
+                # Single-quoted here-string — no $ escaping needed; placeholders swapped below
+                $Bootstrap = @'
+$Host.UI.RawUI.WindowTitle = "Toolkit"
+$ConfigFile = '__CFG__'
+$Owner  = '__OWNER__'
+$Repo   = '__REPO__'
+$Branch = '__BRANCH__'
+$App    = '__APP__'
+
+$Config   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+Write-Host "`n=== PROFILE ACCESS VALIDATION ===" -ForegroundColor Yellow
+$Username = Read-Host "Identify User Profile"
+if (-not $Config.Users.$Username) {
+    Write-Host "[!] Profile not found." -ForegroundColor Red
+    Read-Host "Press Enter to exit"; exit
+}
+Write-Host "Enter Security PIN for '$Username': " -NoNewline -ForegroundColor White
+$SecurePin = Read-Host -AsSecureString
+$BSTR    = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePin)
+$UserPin = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+Write-Host ""
+
+$Enc  = $Config.Users.$Username
+$Segs = $Enc.Split('|')
+$SecretKey = "$UserPin$($Segs[0])".PadRight(32).Substring(0,32)
+$Mixed = [System.Convert]::FromBase64String($Segs[1])
+$KeyB  = [System.Text.Encoding]::Unicode.GetBytes($SecretKey)
+$DecB  = New-Object byte[] $Mixed.Length
+for($i=0;$i -lt $Mixed.Length;$i++){$DecB[$i]=$Mixed[$i] -bxor $KeyB[$i % $KeyB.Length]}
+$Token = [System.Text.Encoding]::Unicode.GetString($DecB).Trim().Replace("`0","")
+
+$TokenSnip  = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
+$AuthHeader = @{ Authorization = "Bearer $Token" }
+
+Clear-Host
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "                     LIVE ENVIRONMENT RUNTIME DEBUG                  " -ForegroundColor Yellow
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "  * Target Repository : $Owner/$Repo [$Branch]" -ForegroundColor Gray
+Write-Host "  * Token Preview     : $TokenSnip" -ForegroundColor Gray
+Write-Host "=====================================================================" -ForegroundColor Yellow
+
+Write-Host "`n[DEBUG] Testing cloud connectivity to Private Modules via API..." -ForegroundColor Cyan
+try {
+    $res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" `
+        -Headers $AuthHeader -Method Get -UseBasicParsing
+    Write-Host "[DEBUG] SUCCESS: API clean. Discovered $($res.Count) items." -ForegroundColor Green
+} catch {
+    Write-Host "[DEBUG] FAILURE: $($_.Exception.Message)" -ForegroundColor Red
+}
+
+Read-Host "`nPress [Enter] to launch TUI (or Ctrl+C to abort)"
+
+$global:ToolkitAuthHeader = $AuthHeader
+$global:ToolkitPAT        = $Token
+$global:ToolkitRepoOwner  = $Owner
+$global:ToolkitTargetRepo = $Repo
+$global:ToolkitBranch     = $Branch
+$cb   = [guid]::NewGuid().ToString()
+$code = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Owner/$App/$Branch/Entry.ps1?t=$cb" -UseBasicParsing
+. ([scriptblock]::Create($code)) -AuthHeader $AuthHeader -RepoOwner $Owner -TargetRepo $Repo -Branch $Branch
+Remove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
+'@
+                $Bootstrap = $Bootstrap.Replace('__CFG__',    $ConfigFile)
+                $Bootstrap = $Bootstrap.Replace('__OWNER__',  $DbgOwner)
+                $Bootstrap = $Bootstrap.Replace('__REPO__',   $DbgRepo)
+                $Bootstrap = $Bootstrap.Replace('__BRANCH__', $DbgBranch)
+                $Bootstrap = $Bootstrap.Replace('__APP__',    $DbgApp)
+                Set-Content -Path $TempPath -Value $Bootstrap -Encoding UTF8
+
+                $Launched = $false
+                if (Get-Command wt -ErrorAction SilentlyContinue) {
+                    try {
+                        # No spaces in title; -- separates wt args from pwsh args
+                        & wt -w 0 new-tab --title Toolkit -- pwsh -NoProfile -ExecutionPolicy Bypass -File $TempPath
+                        $Launched = $true
+                    } catch { }
+                }
+                if (-not $Launched) {
+                    Start-Process pwsh -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$TempPath)
+                }
+                Write-Host "[+] Debug session launched in new tab." -ForegroundColor Green
+                Start-Sleep -Milliseconds 600
             }
             "2" { New-UserTokenConfig }
             "3" {
