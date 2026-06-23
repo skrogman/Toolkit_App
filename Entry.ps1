@@ -188,7 +188,7 @@ try {
                 }
                 
                 $ScriptBlock = [scriptblock]::Create($ModuleCode)
-                . $ScriptBlock
+                . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule
 
             } catch {
                 Write-Host "`n[!] CRASH fetching or running $($global:TargetModule) Orchestrator: $($_.Exception.Message)" -ForegroundColor Red
