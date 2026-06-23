@@ -189,29 +189,29 @@ function Show-ConfigMenu {
                     $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
                     $global:ToolkitDebugMode  = $true
 
-                    $DbgModule = Join-Path $ScriptRootPath 'DebugWindow.psm1'
-                    if (Test-Path $DbgModule) {
-                        Import-Module $DbgModule -Force -ErrorAction Stop
-                        Start-DebugWindow
-                        Start-Sleep -Milliseconds 800
+                    # Fetch DebugWindow.psm1 from the public Toolkit_App repo (no local disk dependency)
+                    Write-Host "[*] Fetching debug module from Toolkit_App repo..." -ForegroundColor DarkGray
+                    $DbgTemp = Join-Path $env:TEMP "DebugWindow.psm1"
+                    $cb = [guid]::NewGuid().ToString()
+                    Invoke-RestMethod -Uri "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$cb" -OutFile $DbgTemp -UseBasicParsing
+                    Import-Module $DbgTemp -Force -ErrorAction Stop
 
-                        $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
-                        Write-DebugWindow "=== TOOLKIT DEBUG SESSION ===" -Level INFO
-                        Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
-                        Write-DebugWindow "Token  : $Snip" -Level INFO
-                        Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
-                        try {
-                            $Res = Invoke-RestMethod -Uri "https://api.github.com/repos/$($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo)/contents?ref=$($global:ToolkitBranch)" `
-                                -Headers $global:ToolkitAuthHeader -Method Get -UseBasicParsing
-                            Write-DebugWindow "API OK: $($Res.Count) items in /$($global:ToolkitTargetRepo) root" -Level INFO
-                        } catch {
-                            Write-DebugWindow "API FAIL: $($_.Exception.Message)" -Level ERROR
-                        }
-                        Write-DebugWindow "Launching TUI with local Entry.ps1..." -Level INFO
-                    } else {
-                        Write-Host "[!] DebugWindow.psm1 not found — run: git pull" -ForegroundColor Red
-                        Read-Host "Press [Enter] to continue"
+                    Start-DebugWindow
+                    Start-Sleep -Milliseconds 800
+
+                    $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
+                    Write-DebugWindow "=== TOOLKIT DEBUG SESSION ===" -Level INFO
+                    Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
+                    Write-DebugWindow "Token  : $Snip" -Level INFO
+                    Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
+                    try {
+                        $Res = Invoke-RestMethod -Uri "https://api.github.com/repos/$($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo)/contents?ref=$($global:ToolkitBranch)" `
+                            -Headers $global:ToolkitAuthHeader -Method Get -UseBasicParsing
+                        Write-DebugWindow "API OK: $($Res.Count) items in /$($global:ToolkitTargetRepo) root" -Level INFO
+                    } catch {
+                        Write-DebugWindow "API FAIL: $($_.Exception.Message)" -Level ERROR
                     }
+                    Write-DebugWindow "Launching TUI with local Entry.ps1..." -Level INFO
                     return   # exit Show-ConfigMenu; production handoff picks up below
                 } catch {
                     Write-Host "`n[!] Auth failed: $($_.Exception.Message)" -ForegroundColor Red

@@ -150,12 +150,18 @@ function Start-DebugWindow {
         $window.ShowDialog() | Out-Null
     }
 
-    # Initialize and spawn the separate Background Runspace
+    # WPF requires STA threading — PowerShell 7 defaults to MTA, so create an explicit STA runspace
+    $sta = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $sta.ApartmentState = [System.Threading.ApartmentState]::STA
+    $sta.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+    $sta.Open()
+
     $Global:DebugSync.PowerShellInstance = [PowerShell]::Create()
+    $Global:DebugSync.PowerShellInstance.Runspace = $sta
     $null = $Global:DebugSync.PowerShellInstance.AddScript($UiScript).AddArgument($Global:DebugSync)
     $null = $Global:DebugSync.PowerShellInstance.BeginInvoke()
 
-    Write-Host "Debug window successfully launched in a separate thread." -ForegroundColor Green
+    Write-Host "Debug window launched (STA/WPF background runspace)." -ForegroundColor Green
 }
 
 function Write-DebugWindow {
@@ -192,7 +198,9 @@ function Stop-DebugWindow {
         Forcefully disposes and shuts down the background debugging instance.
     #>
     if ($Global:DebugSync.PowerShellInstance -ne $null) {
+        $rs = $Global:DebugSync.PowerShellInstance.Runspace
         $Global:DebugSync.PowerShellInstance.Dispose()
+        if ($rs) { try { $rs.Dispose() } catch {} }
         $Global:DebugSync.PowerShellInstance = $null
     }
     $Global:DebugSync.Running = $false
