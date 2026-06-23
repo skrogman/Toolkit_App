@@ -1,184 +1,193 @@
 # ==================================================================
-# Target Repo Asset: skrogman/Toolkit_App/contents/Entry.ps1
-# Architecture: Bootstrap -> Toolkit_App (Here) -> Toolkit_Modules
+# MASTER ORCHESTRATOR: TUI Module Enclave
+# Repository: Toolkit_App / Entry.ps1
 # ==================================================================
+[CmdletBinding()]
+param (
+    [Parameter(Mandatory=$false)][hashtable]$AuthHeader,
+    [Parameter(Mandatory=$false)][string]$RepoOwner = "skrogman",
+    [Parameter(Mandatory=$false)][string]$TargetRepo = "Toolkit_Modules", # Where the modules live
+    [Parameter(Mandatory=$false)][string]$Branch = "main",
+    [Parameter(ValueFromRemainingArguments=$true)]$CatchAllParameters
+)
 
-# --- [1] LIFECYCLE INITIALIZATION & SMART LOGGING ---
-$ScriptIdentity = "ORCHESTRATOR"
-$OrchStartTime  = Get-Date
+$ErrorActionPreference = "Stop"
 
-function Add-DiagnosticLog {
-    param([string]$Message, [string]$Level = "INFO")
-    $Formatted = "[$Level] [$ScriptIdentity] $Message"
+function Write-OrchestratorLog {
+    param($Level, $Message)
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$Level] [ORCHESTRATOR] $Message" -ForegroundColor DarkGray
+}
+
+try {
+    Write-OrchestratorLog "INFO" "Bootstrapping Master TUI Enclave..."
     
-    if (Get-Command "Log-Write" -ErrorAction SilentlyContinue) {
-        try {
-            # Pass as a single, plain argument to prevent parameter binding issues
-            Log-Write $Formatted -ErrorAction Stop
-        } catch {
-            Write-Host $Formatted -ForegroundColor DarkGray
-        }
-    } else {
-        Write-Host $Formatted -ForegroundColor DarkGray
+    # --- [1] DEPENDENCY BOOTSTRAPPER ---
+    $GuiVersion = "1.14.1" 
+    $NStackVersion = "1.0.7"
+    $TempDir = Join-Path $env:TEMP "TerminalGui_Standalone_Master"
+    $ExtractDir = Join-Path $TempDir "Assemblies"
+
+    if (-not (Test-Path $ExtractDir)) {
+        $null = New-Item -Path $ExtractDir -ItemType Directory -Force -ErrorAction SilentlyContinue
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Terminal.Gui/$GuiVersion" -OutFile "$TempDir\Terminal.Gui.zip"
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion" -OutFile "$TempDir\NStack.Core.zip"
+        Expand-Archive -Path "$TempDir\Terminal.Gui.zip" -DestinationPath $ExtractDir -Force
+        Expand-Archive -Path "$TempDir\NStack.Core.zip" -DestinationPath $ExtractDir -Force
     }
-}
 
-Add-DiagnosticLog "Pipeline lifecycle initialized at $($OrchStartTime.ToString('yyyy-MM-dd HH:mm:ss'))."
+    $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll" -Recurse | Select-Object -First 1
+    $GuiDll = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll" -Recurse | Select-Object -First 1
 
-# --- [2] OMNI-TOKEN HARVESTING ENGINE ---
-$TokenSource = "None"
-$DiscoveredToken = $null
+    # Safe loading: Prevents crashes if a child module already loaded the DLLs
+    try { Add-Type -Path $NStackDll.FullName -ErrorAction Stop } catch { }
+    try { Add-Type -Path $GuiDll.FullName -ErrorAction Stop } catch { }
 
-if ($global:GitHubToken) {
-    $DiscoveredToken = $global:GitHubToken
-    $TokenSource = "Global Variable (`$global:GitHubToken)"
-} elseif ($GitHubToken) {
-    $DiscoveredToken = $GitHubToken
-    $TokenSource = "Local Variable (`$GitHubToken)"
-} elseif ($env:GitHubToken) {
-    $DiscoveredToken = $env:GitHubToken
-    $TokenSource = "Environment Variable (env:GitHubToken)"
-} elseif ($env:GITHUB_TOKEN) {
-    $DiscoveredToken = $env:GITHUB_TOKEN
-    $TokenSource = "Environment Variable (env:GITHUB_TOKEN)"
-} else {
-    $SecretScan = Get-Variable | Where-Object { $_.Value -match '^(ghp_|github_pat_)' } | Select-Object -First 1
-    if ($SecretScan) {
-        $DiscoveredToken = $SecretScan.Value
-        $TokenSource = "Memory Scan (Variable: $($SecretScan.Name))"
-    }
-}
+    # --- [2] DYNAMIC GITHUB API ENUMERATION (Find Folders in Toolkit_Modules) ---
+    Write-OrchestratorLog "INFO" "Querying GitHub API for available modules in $TargetRepo..."
+    
+    $global:MasterMenuItems = @()
+    $global:MasterModulePaths = @()
 
-$AuthHeader = @{ 'User-Agent' = 'Secure-IR-Enclave' }
-if ($DiscoveredToken) {
-    $AuthHeader.Add('Authorization', "Bearer $DiscoveredToken")
-    Add-DiagnosticLog "Identity token successfully recovered via $TokenSource."
-} else {
-    Add-DiagnosticLog "CRITICAL: No identity token found across accessible scopes." "WARN"
-}
-
-# --- [3] NETWORK COMMUNICATOR & AUTOMATIC HEALING ---
-function Invoke-SafeGitHubRequest {
-    param([string]$Url)
-    Add-DiagnosticLog "Dispatching API GET request: $Url" "DEBUG"
-    $WebClient = New-Object System.Net.WebClient
-    $WebClient.Headers.Add('User-Agent', $AuthHeader['User-Agent'])
-    $WebClient.Headers.Add('Accept', "application/vnd.github.v3+json")
-    if ($AuthHeader.ContainsKey('Authorization')) {
-        $WebClient.Headers.Add('Authorization', $AuthHeader['Authorization'])
-    }
-    return $WebClient.DownloadString($Url)
-}
-
-$RepoOwner = "skrogman"
-$RepoNamingOptions = @("toolkit_module", "Toolkit_Module", "Toolkit_Modules", "toolkit-modules")
-$BranchOptions = @("main", "master")
-$DynamicModules = @()
-$ActiveRepoTarget = "None"
-$ActiveBranchTarget = "None"
-$DiscoveryError = $null
-$RawJson = $null
-
-:RepoLoop foreach ($RepoName in $RepoNamingOptions) {
-    foreach ($BranchName in $BranchOptions) {
-        $DiscoveryUrl = "https://api.github.com/repos/$RepoOwner/$RepoName/contents?ref=$BranchName"
-        try {
-            $RawJson = Invoke-SafeGitHubRequest -Url $DiscoveryUrl
-            if ($RawJson) {
-                $ActiveRepoTarget = $RepoName
-                $ActiveBranchTarget = $BranchName
-                $DiscoveryError = $null
-                break :RepoLoop
-            }
-        } catch {
-            $DiscoveryError = $_.Exception.Message
-        }
-    }
-}
-
-if ($RawJson) {
+    $ApiUrl = "https://api.github.com/repos/$RepoOwner/$TargetRepo/contents?ref=$Branch"
+    
     try {
-        $DynamicModules = $RawJson | ConvertFrom-Json | Where-Object { $_.type -eq 'dir' } | Select-Object -ExpandProperty name
-        Add-DiagnosticLog "Discovered $($DynamicModules.Count) functional payloads inside '$ActiveRepoTarget'."
+        if ($AuthHeader) {
+            $ApiResponse = Invoke-RestMethod -Uri $ApiUrl -Headers $AuthHeader -ErrorAction Stop
+        } else {
+            $ApiResponse = Invoke-RestMethod -Uri $ApiUrl -ErrorAction Stop
+        }
+
+        # Filter for DIRECTORIES only, ignoring hidden folders (like .github)
+        $DiscoveredDirs = $ApiResponse | Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } | Sort-Object name
+
+        foreach ($Dir in $DiscoveredDirs) {
+            $global:MasterModulePaths += $Dir.name
+            $global:MasterMenuItems += "Launch Module: $($Dir.name)"
+        }
     } catch {
-        $DiscoveryError = "JSON Parsing Fault: $($_.Exception.Message)"
-        Add-DiagnosticLog "Parsing error encountered reading GitHub payload structures." "ERROR"
-    }
-} else {
-    Add-DiagnosticLog "Repository payload map extraction failed. Last Error: $DiscoveryError" "ERROR"
-}
-
-# --- [4] PERSISTENT UI & RUNTIME LOOP ---
-while ($true) {
-    Clear-Host
-    Write-Host "==================================================" -ForegroundColor Green
-    Write-Host "            SECURE IR & ADMIN TOOLKIT             " -ForegroundColor Green
-    Write-Host "==================================================" -ForegroundColor Green
-    Write-Host "[+] Target Path : $RepoOwner/$ActiveRepoTarget ($ActiveBranchTarget)" -ForegroundColor DarkGray
-    Write-Host ""
-
-    Write-Host "--- DYNAMIC MODULE SELECTION ---" -ForegroundColor Yellow
-    if ($DynamicModules.Count -eq 0) {
-        Write-Host "[X] Warning: No execution modules could be constructed." -ForegroundColor Yellow
-        if ($DiscoveryError) { Write-Host "    API Details: $DiscoveryError" -ForegroundColor Red }
-    } else {
-        for ($i = 0; $i -lt $DynamicModules.Count; $i++) {
-            Write-Host "$($i + 1). $($DynamicModules[$i])"
-        }
-    }
-    
-    $ExitOptionNumber = $DynamicModules.Count + 1
-    Write-Host "$ExitOptionNumber. Exit Launcher Enclave"
-    Write-Host ""
-    
-    $SelectedNumber = 0
-    $InputSelection = (Read-Host "Select an option (1-$ExitOptionNumber)").Trim()
-    
-    if (-not [int]::TryParse($InputSelection, [ref]$SelectedNumber)) {
-        Write-Host "`n[X] Invalid entry format. Use integers only." -ForegroundColor Red
-        Start-Sleep -Seconds 1
-        continue
+        $global:MasterMenuItems += "ERROR: Could not load modules"
+        Write-OrchestratorLog "ERROR" "GitHub API returned an error: $($_.Exception.Message)"
     }
 
-    if ($SelectedNumber -eq $ExitOptionNumber) {
-        $OrchEndTime = Get-Date
-        Add-DiagnosticLog "Purging orchestrator context. Execution boundary completed at $($OrchEndTime.ToString('HH:mm:ss'))."
-        Write-Host "`n[-] Returning control to local initialization enclave..." -ForegroundColor Yellow
-        Start-Sleep -Milliseconds 500
-        return 
-    }
-    elseif ($SelectedNumber -gt 0 -and $SelectedNumber -le $DynamicModules.Count) {
-        $TargetModule = $DynamicModules[$SelectedNumber - 1]
-        Add-DiagnosticLog "Dispatching execution boundary to module: $TargetModule"
-        Write-Host "`n[+] Invoking execution routine for: $TargetModule..." -ForegroundColor Cyan
+    $global:MasterMenuItems += "Exit Toolkit Enclave"
+
+    # --- [3] MASTER TUI EXECUTION LOOP ---
+    $global:ExitMaster = $false
+    $global:TargetModule = $null
+
+    while (-not $global:ExitMaster) {
         
-        try {
-            $ModuleUrl = "https://api.github.com/repos/$RepoOwner/$ActiveRepoTarget/contents/$TargetModule/Entry.ps1?ref=$ActiveBranchTarget"
-            $ScriptContent = Invoke-SafeGitHubRequest -Url $ModuleUrl
+        # --- DYNAMIC RIGHT PANE BUILDER ---
+        $global:UpdateMasterRightPane = {
+            param($ItemIndex)
             
-            if ([string]::IsNullOrWhiteSpace($ScriptContent)) { throw "Target endpoint payload returned empty data map." }
+            $SelectionName = $global:MasterMenuItems[$ItemIndex]
+            $TargetDir = if ($ItemIndex -lt $global:MasterModulePaths.Count) { $global:MasterModulePaths[$ItemIndex] } else { "N/A" }
+
+            $PanelText  = "SECURE IR & ADMIN TOOLKIT`n"
+            $PanelText += "=========================================`n"
+            $PanelText += " Operator   : $($env:USERNAME)`n"
+            $PanelText += " Repository : $RepoOwner/$TargetRepo`n"
+            $PanelText += " Branch     : $Branch`n`n"
+            $PanelText += "--- MODULE INFO ---`n"
+            $PanelText += " Selection  : $SelectionName`n"
+            $PanelText += " Cloud Path : /$TargetDir/Entry.ps1`n`n"
             
-            # [FIXED] Parse the JSON envelope and decode the Base64 script content
-            $FileMeta = $ScriptContent | ConvertFrom-Json
-            if (-not $FileMeta.content) { throw "No base64 content property found in GitHub response." }
+            if ($TargetDir -ne "N/A") {
+                $PanelText += "Press [Enter] to pull payload and inject `ninto execution runspace."
+            } else {
+                $PanelText += "Press [Enter] to securely terminate session."
+            }
             
-            $DecodedScript = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($FileMeta.content))
-            $ScriptBlock = [ScriptBlock]::Create($DecodedScript)
-            
-            # Execute child payload
-& $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $ActiveRepoTarget -Branch $ActiveBranchTarget -AppName $TargetModule
-            
-            Add-DiagnosticLog "Module $TargetModule gracefully yielded control back to Orchestrator."
-        } catch {
-            # [FIXED] Strip newlines from errors to prevent custom loggers from printing blank lines
-            $CleanError = $_.Exception.Message -replace "`r|`n", " | "
-            Add-DiagnosticLog "Fault identified inside dynamic payload thread: $CleanError" "ERROR"
-            Write-Host "`n[X] Dynamic Execution Faulted: $CleanError" -ForegroundColor Red
+            $global:MasterDescView.Text = $PanelText
+            $global:MasterDescView.SetNeedsDisplay()
         }
-        Read-Host "`nPress Enter to return to module selection..."
+
+        [Terminal.Gui.Application]::Init()
+        $Top = [Terminal.Gui.Application]::Top
+
+        # A sleek dark-blue color scheme for the Master Menu
+        $ColorSetup = New-Object Terminal.Gui.ColorScheme
+        $ColorSetup.Normal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::White, [Terminal.Gui.Color]::Blue)
+        $ColorSetup.Focus = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::Black, [Terminal.Gui.Color]::Cyan)
+        $ColorSetup.HotNormal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::BrightYellow, [Terminal.Gui.Color]::Blue)
+        
+        $MainWindow = New-Object Terminal.Gui.Window("=== MASTER ORCHESTRATOR ENCLAVE ===")
+        $MainWindow.ColorScheme = $ColorSetup
+        $Top.Add($MainWindow)
+
+        $HelpText = New-Object Terminal.Gui.Label("Use [Up/Down] arrows. Press [Enter] to inject module.")
+        $HelpText.X = 0; $HelpText.Y = 0
+        $MainWindow.Add($HelpText)
+        
+        $ListView = New-Object Terminal.Gui.ListView
+        [void]$ListView.SetSource($global:MasterMenuItems) 
+        $ListView.X = 0; $ListView.Y = 2
+        $ListView.Width = [Terminal.Gui.Dim]::Percent(45) 
+        $ListView.Height = [Terminal.Gui.Dim]::Fill()
+        $MainWindow.Add($ListView)
+
+        $global:MasterDescView = New-Object Terminal.Gui.TextView
+        $global:MasterDescView.X = [Terminal.Gui.Pos]::Right($ListView) + 1; $global:MasterDescView.Y = 2
+        $global:MasterDescView.Width = [Terminal.Gui.Dim]::Fill()
+        $global:MasterDescView.Height = [Terminal.Gui.Dim]::Fill()
+        $global:MasterDescView.ReadOnly = $true
+        $MainWindow.Add($global:MasterDescView)
+
+        $SelectedItemChangedAction = [System.Action[Terminal.Gui.ListViewItemEventArgs]]{
+            param($e)
+            & $global:UpdateMasterRightPane -ItemIndex $e.Item
+        }
+        [void]$ListView.add_SelectedItemChanged($SelectedItemChangedAction)
+
+        & $global:UpdateMasterRightPane -ItemIndex 0
+
+        $ItemOpenedAction = [System.Action[Terminal.Gui.ListViewItemEventArgs]]{
+            param($e)
+            if ($e.Item -eq ($global:MasterMenuItems.Count - 1)) { 
+                $global:ExitMaster = $true
+            } elseif ($global:MasterModulePaths.Count -gt 0) {
+                $global:TargetModule = $global:MasterModulePaths[$e.Item]
+            }
+            [Terminal.Gui.Application]::RequestStop()
+        }
+        [void]$ListView.add_OpenSelectedItem($ItemOpenedAction)
+
+        [Terminal.Gui.Application]::Run()
+        [Terminal.Gui.Application]::Shutdown()
+
+        # --- [4] DYNAMIC MODULE INJECTION ---
+        if ($global:TargetModule) {
+            Clear-Host
+            
+            $CacheBuster = [guid]::NewGuid().ToString()
+            # Construct the path to the selected module's Entry.ps1
+            $FetchUrl = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
+            
+            Write-Host "`n=================================================================" -ForegroundColor DarkCyan
+            Write-Host " INJECTING MODULE ENVELOPE: $($global:TargetModule) " -ForegroundColor Cyan
+            Write-Host "=================================================================" -ForegroundColor DarkCyan
+            
+            try {
+                if ($AuthHeader) {
+                    $ModuleCode = Invoke-RestMethod -Uri $FetchUrl -Headers $AuthHeader -UseBasicParsing
+                } else {
+                    $ModuleCode = Invoke-RestMethod -Uri $FetchUrl -UseBasicParsing
+                }
+                
+                # Execute the child Entry.ps1
+                $ScriptBlock = [scriptblock]::Create($ModuleCode)
+                . $ScriptBlock
+
+            } catch {
+                Write-Host "`n[!] CRASH fetching or running $($global:TargetModule) Orchestrator: $($_.Exception.Message)" -ForegroundColor Red
+            }
+            
+            $global:TargetModule = $null 
+        }
     }
-    else {
-        Write-Host "`n[X] Selection context outside operational range." -ForegroundColor Red
-        Start-Sleep -Seconds 1
-    }
+} catch {
+    Write-Host "`n[!] Master Enclave Crash: $($_.Exception.Message)" -ForegroundColor Red
 }
+
+Write-Host "`n[+] Master Enclave Terminated. Returning to prompt." -ForegroundColor Green
