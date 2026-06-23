@@ -100,23 +100,29 @@ try {
             $global:MasterDescView.SetNeedsDisplay()
         }
 
-        # --- ENVIRONMENT BYPASS PATCH ---
-        # Hides the terminal type from the GUI library so it forces the Windows drivers instead of Linux (stty)
+        # --- AGGRESSIVE ENVIRONMENT BYPASS PATCH ---
+        # VS Code sets TERM=xterm-256color which tricks Terminal.Gui into using Linux drivers.
+        # We must completely scrub the variable from the process, not just set it to $null.
         $BackupTerm = $env:TERM
-        $env:TERM = $null
+        $BackupColorTerm = $env:COLORTERM
+        Remove-Item Env:\TERM -ErrorAction SilentlyContinue
+        Remove-Item Env:\COLORTERM -ErrorAction SilentlyContinue
 
         [Terminal.Gui.Application]::Init()
         $Top = [Terminal.Gui.Application]::Top
         
-        $env:TERM = $BackupTerm 
-        # --------------------------------
+        if ($BackupTerm) { $env:TERM = $BackupTerm }
+        if ($BackupColorTerm) { $env:COLORTERM = $BackupColorTerm }
+        # -------------------------------------------
 
         $ColorSetup = New-Object Terminal.Gui.ColorScheme
         $ColorSetup.Normal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::White, [Terminal.Gui.Color]::Blue)
         $ColorSetup.Focus = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::Black, [Terminal.Gui.Color]::Cyan)
         $ColorSetup.HotNormal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::BrightYellow, [Terminal.Gui.Color]::Blue)
         
-        $MainWindow = New-Object Terminal.Gui.Window("=== MASTER ORCHESTRATOR ENCLAVE ===")
+        # --- CUSTOM WINDOW TITLE ---
+        $WindowTitle = "=== MASTER ORCHESTRATOR ENCLAVE ===  [Target Repo: $TargetRepo]"
+        $MainWindow = New-Object Terminal.Gui.Window($WindowTitle)
         $MainWindow.ColorScheme = $ColorSetup
         $Top.Add($MainWindow)
 
@@ -178,6 +184,8 @@ try {
 
             } catch {
                 Write-Host "`n[!] CRASH fetching or running $($global:TargetModule) Orchestrator: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "Press [Enter] to continue..." -ForegroundColor Yellow
+                Read-Host | Out-Null
             }
             
             $global:TargetModule = $null 
