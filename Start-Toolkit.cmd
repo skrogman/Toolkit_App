@@ -182,25 +182,35 @@ public class ConWin {
 }
 
 function Show-ConfigMenu {
-    # Auto-reconnect to a debug window that survived from a previous (pre-elevation) session
+    # --- Auto-reconnect to debug window from pre-elevation session ---
     $pidFile = Join-Path $env:TEMP "toolkit_debug_active.pid"
     $logFile = Join-Path $env:TEMP "toolkit_debug_active.log"
-    if (-not ($Global:DebugSync -and $Global:DebugSync.Running) -and (Test-Path $pidFile) -and (Test-Path $logFile)) {
-        try {
-            $savedPid = [int](Get-Content $pidFile -Raw).Trim()
-            $proc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
-            if ($proc -and -not $proc.HasExited) {
+    if ((Test-Path $pidFile) -and (Test-Path $logFile)) {
+        $savedPid = try { [int](Get-Content $pidFile -Raw).Trim() } catch { -1 }
+        if ($savedPid -gt 0) {
+            $wpfProc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($wpfProc -and -not $wpfProc.HasExited) {
+                # Load module if not already loaded (don't stop on error — we wire up manually below)
                 $DbgTemp = Join-Path $env:TEMP "DebugWindow.psm1"
                 if (-not (Test-Path $DbgTemp)) {
-                    $cb = [guid]::NewGuid().ToString()
-                    Invoke-RestMethod "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$cb" -OutFile $DbgTemp -UseBasicParsing
+                    try { Invoke-RestMethod "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$([guid]::NewGuid())" -OutFile $DbgTemp -UseBasicParsing } catch {}
                 }
-                Import-Module $DbgTemp -Force -ErrorAction Stop
-                Start-DebugWindow   # PID file check inside reconnects without spawning new window
+                if (Test-Path $DbgTemp) { try { Import-Module $DbgTemp -Force -ErrorAction SilentlyContinue } catch {} }
+
+                # Wire up globals directly — Import-Module resets DebugSync so we must do this AFTER import
+                $Global:DebugSync = [hashtable]::Synchronized(@{
+                    LogFile = $logFile
+                    Running = $true
+                    WpfProc = $wpfProc
+                })
+
+                # Write reconnect banner straight to log file (bypasses sync-state check)
                 $isElev = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-                Write-DebugWindow "=== Session reconnected | Elevated: $isElev ===" -Level INFO
+                $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+                [System.IO.File]::AppendAllText($logFile, "[$ts] [INFO ] === Debug console reconnected | Elevated: $isElev ===`r`n", [System.Text.Encoding]::UTF8)
+                Write-Host "[+] Debug console reconnected (PID $savedPid, Elevated: $isElev)" -ForegroundColor Green
             }
-        } catch {}
+        }
     }
 
     while ($true) {
@@ -208,12 +218,16 @@ function Show-ConfigMenu {
         Write-Host "=====================================================================" -ForegroundColor Yellow
         Write-Host "             IR TOOLKIT - LOCAL ADMINISTRATION PANEL                  " -ForegroundColor Yellow
         Write-Host "=====================================================================" -ForegroundColor Yellow
-        Write-Host "  1) Open Debug Console" -ForegroundColor Cyan
+        $_isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $_dbgTag  = if ($Global:DebugSync -and $Global:DebugSync.Running) { " [Running]" } else { "" }
+        $_admTag  = if ($_isAdmin) { " [Elevated]" } else { " [Not Elevated]" }
+
+        Write-Host "  1) Open Debug Console$_dbgTag" -ForegroundColor Cyan
         Write-Host "  2) Roll / Encode New User PAT (Add/Update User with PIN)" -ForegroundColor Cyan
         Write-Host "  3) List Currently Configured Users" -ForegroundColor Cyan
         Write-Host "  4) Exit Administration Panel and Start Production Handoff" -ForegroundColor Green
         Write-Host "  5) Abort & Exit Completely" -ForegroundColor Red
-        Write-Host "  6) Relaunch as Administrator" -ForegroundColor Magenta
+        Write-Host "  6) Relaunch as Administrator$_admTag" -ForegroundColor Magenta
         Write-Host "  7) Authenticate & Launch Toolkit" -ForegroundColor Green
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
@@ -257,23 +271,36 @@ function Show-ConfigMenu {
             "4" { return }
             "5" { Exit }
             "6" {
-                $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-                if ($IsAdmin) {
+                if ($_isAdmin) {
                     Write-Host "`n[!] Already running as Administrator." -ForegroundColor Yellow
                     if ($Global:DebugSync -and $Global:DebugSync.Running) { Write-DebugWindow "Already elevated — no relaunch needed." -Level WARN }
                     Start-Sleep -Seconds 2
                 } else {
+                    $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
+                    Write-Host "`n  Launching: $CmdFile" -ForegroundColor DarkGray
                     if ($Global:DebugSync -and $Global:DebugSync.Running) {
                         Write-DebugWindow "Relaunching as Administrator — debug console will stay open." -Level WARN
-                        Start-Sleep -Milliseconds 600
+                        Start-Sleep -Milliseconds 500
                     }
-                    $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
-                    # Write flag file so the elevated session re-enters the admin menu automatically
-                    [System.IO.File]::WriteAllText((Join-Path $env:TEMP "toolkit_admin_menu.flag"), "1")
-                    Write-Host "`n[*] Relaunching as Administrator..." -ForegroundColor Magenta
-                    # Use cmd.exe as the elevated host — reliable UAC, inherits the same console window
-                    Start-Process cmd.exe -Verb RunAs -ArgumentList "/c `"`"$CmdFile`"`""
-                    Exit
+                    Write-Host "[*] A UAC prompt will appear — click Yes to elevate..." -ForegroundColor Yellow
+                    $flagPath = Join-Path $env:TEMP "toolkit_admin_menu.flag"
+                    try {
+                        # Flag written inside try — only persists if Start-Process succeeds
+                        [System.IO.File]::WriteAllText($flagPath, "1")
+                        Start-Process -FilePath $CmdFile -Verb RunAs -ErrorAction Stop
+                        Write-Host "[+] Elevated process launched. This window will close." -ForegroundColor Green
+                        Start-Sleep -Milliseconds 400
+                        [Environment]::Exit(0)
+                    } catch {
+                        Remove-Item $flagPath -Force -ErrorAction SilentlyContinue
+                        Write-Host "`n[!] Elevation failed or UAC was denied." -ForegroundColor Red
+                        Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkRed
+                        Write-Host "    Tip: right-click Start-Toolkit.cmd → 'Run as administrator'" -ForegroundColor Yellow
+                        if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                            Write-DebugWindow "Elevation FAILED: $($_.Exception.Message)" -Level ERROR
+                        }
+                        Read-Host "`nPress [Enter] to return to menu"
+                    }
                 }
             }
             "7" {
