@@ -338,9 +338,11 @@ try {
 
             } catch {
                 Write-Host "`n[!] CRASH fetching or running $($global:TargetModule): $($_.Exception.Message)" -ForegroundColor Red
-                Write-Host "Press [Enter] to continue..." -ForegroundColor Yellow
-                Read-Host | Out-Null
             }
+
+            Write-Host "`n─────────────────────────────────────────────" -ForegroundColor DarkGray
+            Write-Host "  Press [Enter] to return to the Toolkit..." -ForegroundColor Gray
+            Read-Host | Out-Null
 
             $global:TargetModule = $null
         }

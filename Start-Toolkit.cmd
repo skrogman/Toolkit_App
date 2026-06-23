@@ -156,62 +156,6 @@ function Get-DecodedToken($Config) {
     }
 }
 
-function Invoke-DiagnosticsEngine($AuthHeader, $Config) {
-    $Owner  = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
-    $Repo   = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
-    $Branch = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
-
-    $RawToken   = ($AuthHeader['Authorization'] -replace '^Bearer ', '').Trim()
-    $TokenSnip  = if ($RawToken.Length -ge 10) { $RawToken.Substring(0,10) + "..." } else { "(empty)" }
-    $TempScript = Join-Path $env:TEMP "tk_debug_$(Get-Random).ps1"
-
-    # Everything — diagnostics AND the TUI — runs inside the new tab
-    @"
-`$Host.UI.RawUI.WindowTitle = "Toolkit Debug"
-Write-Host "=====================================================================" -ForegroundColor Yellow
-Write-Host "                     LIVE ENVIRONMENT RUNTIME DEBUG                  " -ForegroundColor Yellow
-Write-Host "=====================================================================" -ForegroundColor Yellow
-Write-Host "  * Target Repository : $Owner/$Repo [$Branch]" -ForegroundColor Gray
-Write-Host "  * Token Preview     : $TokenSnip" -ForegroundColor Gray
-Write-Host "=====================================================================`n" -ForegroundColor Yellow
-
-Write-Host "[DEBUG] Testing cloud connectivity to Private Modules via API..." -ForegroundColor Cyan
-try {
-    `$res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" ``
-        -Headers @{ Authorization = "Bearer $RawToken" } -Method Get -UseBasicParsing
-    Write-Host "[DEBUG] SUCCESS: API clean. Discovered `$(`$res.Count) items." -ForegroundColor Green
-} catch {
-    Write-Host "[DEBUG] FAILURE: `$(`$_.Exception.Message)" -ForegroundColor Red
-}
-
-Write-Host ""
-Read-Host "Press [Enter] to launch TUI (or Ctrl+C to abort)"
-
-`$global:ToolkitAuthHeader = @{ Authorization = "Bearer $RawToken" }
-`$global:ToolkitPAT        = "$RawToken"
-`$global:ToolkitRepoOwner  = "$Owner"
-`$global:ToolkitTargetRepo = "$Repo"
-`$global:ToolkitBranch     = "$Branch"
-`$cb   = [guid]::NewGuid().ToString()
-`$code = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Owner/Toolkit_App/$Branch/Entry.ps1?t=`$cb" -UseBasicParsing
-. ([scriptblock]::Create(`$code)) -AuthHeader `$global:ToolkitAuthHeader -RepoOwner "$Owner" -TargetRepo "$Repo" -Branch "$Branch"
-Remove-Item `$MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-"@ | Set-Content -Path $TempScript -Encoding UTF8
-
-    $Launched = $false
-    if (Get-Command wt -ErrorAction SilentlyContinue) {
-        try {
-            Start-Process wt -ArgumentList @("-w", "0", "new-tab", "--title", "Toolkit Debug", "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempScript)
-            $Launched = $true
-        } catch { }
-    }
-    if (-not $Launched) {
-        Start-Process pwsh -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempScript)
-    }
-
-    Write-Host "[+] Debug session launched in new tab. This panel stays open." -ForegroundColor Green
-    Read-Host "Press [Enter] to return to admin menu"
-}
 
 function Show-ConfigMenu {
     while ($true) {
@@ -300,29 +244,37 @@ $global:ToolkitRepoOwner  = $Owner
 $global:ToolkitTargetRepo = $Repo
 $global:ToolkitBranch     = $Branch
 $cb   = [guid]::NewGuid().ToString()
-$code = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Owner/$App/$Branch/Entry.ps1?t=$cb" -UseBasicParsing
+$LocalEntry = '__LOCAL_ENTRY__'
+if (Test-Path $LocalEntry) {
+    Write-Host "[DEBUG] Using local Entry.ps1 (no CDN wait)" -ForegroundColor Magenta
+    $code = Get-Content -Path $LocalEntry -Raw
+} else {
+    $cb   = [guid]::NewGuid().ToString()
+    $code = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Owner/$App/$Branch/Entry.ps1?t=$cb" -UseBasicParsing
+}
 . ([scriptblock]::Create($code)) -AuthHeader $AuthHeader -RepoOwner $Owner -TargetRepo $Repo -Branch $Branch
 Remove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
 '@
-                $Bootstrap = $Bootstrap.Replace('__CFG__',    $ConfigFile)
-                $Bootstrap = $Bootstrap.Replace('__OWNER__',  $DbgOwner)
-                $Bootstrap = $Bootstrap.Replace('__REPO__',   $DbgRepo)
-                $Bootstrap = $Bootstrap.Replace('__BRANCH__', $DbgBranch)
-                $Bootstrap = $Bootstrap.Replace('__APP__',    $DbgApp)
+                $Bootstrap = $Bootstrap.Replace('__CFG__',         $ConfigFile)
+                $Bootstrap = $Bootstrap.Replace('__OWNER__',       $DbgOwner)
+                $Bootstrap = $Bootstrap.Replace('__REPO__',        $DbgRepo)
+                $Bootstrap = $Bootstrap.Replace('__BRANCH__',      $DbgBranch)
+                $Bootstrap = $Bootstrap.Replace('__APP__',         $DbgApp)
+                $Bootstrap = $Bootstrap.Replace('__LOCAL_ENTRY__', (Join-Path $ScriptRootPath 'Entry.ps1'))
                 Set-Content -Path $TempPath -Value $Bootstrap -Encoding UTF8
 
+                # Start-Process (not & operator) spawns a detached process — no console inheritance
                 $Launched = $false
                 if (Get-Command wt -ErrorAction SilentlyContinue) {
                     try {
-                        # No spaces in title; -- separates wt args from pwsh args
-                        & wt -w 0 new-tab --title Toolkit -- pwsh -NoProfile -ExecutionPolicy Bypass -File $TempPath
+                        Start-Process wt -ArgumentList @("new-tab", "--title", "Toolkit", "--", "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempPath) -ErrorAction Stop
                         $Launched = $true
                     } catch { }
                 }
                 if (-not $Launched) {
-                    Start-Process pwsh -ArgumentList @("-NoProfile","-ExecutionPolicy","Bypass","-File",$TempPath)
+                    Start-Process pwsh -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempPath) -WindowStyle Normal
                 }
-                Write-Host "[+] Debug session launched in new tab." -ForegroundColor Green
+                Write-Host "[+] Debug session launching in separate window..." -ForegroundColor Green
                 Start-Sleep -Milliseconds 600
             }
             "2" { New-UserTokenConfig }
