@@ -157,34 +157,36 @@ function Get-DecodedToken($Config) {
 }
 
 function Invoke-DiagnosticsEngine($AuthHeader, $Config) {
-    Clear-Host
     $Owner  = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
     $Repo   = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
     $Branch = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
 
-    $RawToken  = ($AuthHeader['Authorization'] -replace '^Bearer ', '').Trim()
-    $TokenSnip = if ($RawToken.Length -ge 10) { $RawToken.Substring(0,10) + "..." } else { "(empty)" }
-
-    Write-Host "=====================================================================" -ForegroundColor Yellow
-    Write-Host "                     LIVE ENVIRONMENT RUNTIME DEBUG                  " -ForegroundColor Yellow
-    Write-Host "=====================================================================" -ForegroundColor Yellow
-    Write-Host "  * Target Repository : $Owner/$Repo [$Branch]" -ForegroundColor Gray
-    Write-Host "  * Token Preview     : $TokenSnip" -ForegroundColor Gray
-    Write-Host "=====================================================================`n" -ForegroundColor Yellow
-
-    Write-Host "[DEBUG] Testing cloud connectivity to Private Modules via API..." -ForegroundColor Cyan
-    try {
-        $TestResponse = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" -Headers $AuthHeader -Method Get -UseBasicParsing
-        Write-Host "[DEBUG] SUCCESS: API clean. Discovered $($TestResponse.Count) items." -ForegroundColor Green
-    } catch {
-        Write-Host "[DEBUG] FAILURE: $($_.Exception.Message)" -ForegroundColor Red
-    }
-
-    Write-Host "`n[DEBUG] Spawning Toolkit TUI in new window/tab..." -ForegroundColor Cyan
-
-    # Write a self-deleting bootstrap to temp — sets globals then launches Entry.ps1
+    $RawToken   = ($AuthHeader['Authorization'] -replace '^Bearer ', '').Trim()
+    $TokenSnip  = if ($RawToken.Length -ge 10) { $RawToken.Substring(0,10) + "..." } else { "(empty)" }
     $TempScript = Join-Path $env:TEMP "tk_debug_$(Get-Random).ps1"
+
+    # Everything — diagnostics AND the TUI — runs inside the new tab
     @"
+`$Host.UI.RawUI.WindowTitle = "Toolkit Debug"
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "                     LIVE ENVIRONMENT RUNTIME DEBUG                  " -ForegroundColor Yellow
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "  * Target Repository : $Owner/$Repo [$Branch]" -ForegroundColor Gray
+Write-Host "  * Token Preview     : $TokenSnip" -ForegroundColor Gray
+Write-Host "=====================================================================`n" -ForegroundColor Yellow
+
+Write-Host "[DEBUG] Testing cloud connectivity to Private Modules via API..." -ForegroundColor Cyan
+try {
+    `$res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" ``
+        -Headers @{ Authorization = "Bearer $RawToken" } -Method Get -UseBasicParsing
+    Write-Host "[DEBUG] SUCCESS: API clean. Discovered `$(`$res.Count) items." -ForegroundColor Green
+} catch {
+    Write-Host "[DEBUG] FAILURE: `$(`$_.Exception.Message)" -ForegroundColor Red
+}
+
+Write-Host ""
+Read-Host "Press [Enter] to launch TUI (or Ctrl+C to abort)"
+
 `$global:ToolkitAuthHeader = @{ Authorization = "Bearer $RawToken" }
 `$global:ToolkitPAT        = "$RawToken"
 `$global:ToolkitRepoOwner  = "$Owner"
@@ -199,22 +201,16 @@ Remove-Item `$MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
     $Launched = $false
     if (Get-Command wt -ErrorAction SilentlyContinue) {
         try {
-            Start-Process wt -ArgumentList @("-w", "0", "new-tab", "--title", "Toolkit", "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempScript)
+            Start-Process wt -ArgumentList @("-w", "0", "new-tab", "--title", "Toolkit Debug", "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempScript)
             $Launched = $true
-            Write-Host "[DEBUG] Launched in new Windows Terminal tab." -ForegroundColor Green
-        } catch {
-            Write-Host "[DEBUG] wt failed, falling back to new window..." -ForegroundColor Yellow
-        }
+        } catch { }
     }
     if (-not $Launched) {
         Start-Process pwsh -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempScript)
-        Write-Host "[DEBUG] Launched in new PowerShell window." -ForegroundColor Green
     }
 
-    Write-Host "`n=====================================================================" -ForegroundColor Yellow
-    Write-Host " TUI is running in a separate window. This panel stays open." -ForegroundColor Yellow
-    Write-Host "=====================================================================" -ForegroundColor Yellow
-    Read-Host "Press [Enter] to return to admin panel"
+    Write-Host "[+] Debug session launched in new tab. This panel stays open." -ForegroundColor Green
+    Read-Host "Press [Enter] to return to admin menu"
 }
 
 function Show-ConfigMenu {
@@ -265,12 +261,6 @@ function Show-ConfigMenu {
     }
 }
 
-# Route to menu if trigger state exists
-if ($ShiftPressed) {
-    Show-ConfigMenu
-    Clear-Host
-}
-
 # --- [2] SINGLE-INSTANCE LOCK SYSTEM ---
 $MutexName  = "Global\SkrogmanIRToolkitEnclaveLock"
 $CreatedNew = $false
@@ -297,6 +287,12 @@ if (-not $CreatedNew) {
         if ($Mutex) { $Mutex.Dispose() }
         $Mutex = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
     }
+}
+
+# Route to admin menu if Shift was held — mutex is already held so only one instance can enter
+if ($ShiftPressed) {
+    Show-ConfigMenu
+    Clear-Host
 }
 
 try {
