@@ -100,30 +100,30 @@ try {
             $global:MasterDescView.SetNeedsDisplay()
         }
 
-        # --- AGGRESSIVE ENVIRONMENT BYPASS PATCH ---
-        # VS Code sets TERM=xterm-256color which tricks Terminal.Gui into using Linux drivers.
-        # We must completely scrub the variable from the process, not just set it to $null.
-        $BackupTerm = $env:TERM
-        $BackupColorTerm = $env:COLORTERM
-        Remove-Item Env:\TERM -ErrorAction SilentlyContinue
-        Remove-Item Env:\COLORTERM -ErrorAction SilentlyContinue
+        # --- RAW .NET ENVIRONMENT BYPASS ---
+        # Completely scrub these variables from the process memory so Terminal.Gui doesn't look for Linux 'libc'
+        $BackupTerm = [Environment]::GetEnvironmentVariable("TERM", "Process")
+        $BackupColorTerm = [Environment]::GetEnvironmentVariable("COLORTERM", "Process")
+        [Environment]::SetEnvironmentVariable("TERM", $null, "Process")
+        [Environment]::SetEnvironmentVariable("COLORTERM", $null, "Process")
 
         [Terminal.Gui.Application]::Init()
         $Top = [Terminal.Gui.Application]::Top
         
-        if ($BackupTerm) { $env:TERM = $BackupTerm }
-        if ($BackupColorTerm) { $env:COLORTERM = $BackupColorTerm }
-        # -------------------------------------------
+        # Restore them immediately after init
+        if ($BackupTerm) { [Environment]::SetEnvironmentVariable("TERM", $BackupTerm, "Process") }
+        if ($BackupColorTerm) { [Environment]::SetEnvironmentVariable("COLORTERM", $BackupColorTerm, "Process") }
+        # -----------------------------------
 
         $ColorSetup = New-Object Terminal.Gui.ColorScheme
         $ColorSetup.Normal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::White, [Terminal.Gui.Color]::Blue)
         $ColorSetup.Focus = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::Black, [Terminal.Gui.Color]::Cyan)
         $ColorSetup.HotNormal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::BrightYellow, [Terminal.Gui.Color]::Blue)
         
-        # --- CUSTOM WINDOW TITLE ---
-        $WindowTitle = "=== MASTER ORCHESTRATOR ENCLAVE ===  [Target Repo: $TargetRepo]"
-        $MainWindow = New-Object Terminal.Gui.Window($WindowTitle)
+        $MainWindow = New-Object Terminal.Gui.Window("=== MASTER ORCHESTRATOR ENCLAVE ===")
         $MainWindow.ColorScheme = $ColorSetup
+        # Leave room at the bottom for the status bar
+        $MainWindow.Height = [Terminal.Gui.Dim]::Fill() - 1 
         $Top.Add($MainWindow)
 
         $HelpText = New-Object Terminal.Gui.Label("Use [Up/Down] arrows. Press [Enter] to inject module.")
@@ -162,6 +162,14 @@ try {
             [Terminal.Gui.Application]::RequestStop()
         }
         [void]$ListView.add_OpenSelectedItem($ItemOpenedAction)
+
+        # --- BOTTOM STATUS BAR ---
+        $DummyAction = [System.Action]{ }
+        $StatusArray = [Terminal.Gui.StatusItem[]]@(
+            (New-Object Terminal.Gui.StatusItem([Terminal.Gui.Key]::Null, "Operating Environment: $TargetRepo", $DummyAction))
+        )
+        $StatusBar = New-Object Terminal.Gui.StatusBar($StatusArray)
+        $Top.Add($StatusBar)
 
         [Terminal.Gui.Application]::Run()
         [Terminal.Gui.Application]::Shutdown()
