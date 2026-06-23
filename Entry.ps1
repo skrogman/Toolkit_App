@@ -6,7 +6,7 @@
 param (
     [Parameter(Mandatory=$false)][hashtable]$AuthHeader,
     [Parameter(Mandatory=$false)][string]$RepoOwner = "skrogman",
-    [Parameter(Mandatory=$false)][string]$TargetRepo = "Toolkit_Modules", # Where the modules live
+    [Parameter(Mandatory=$false)][string]$TargetRepo = "Toolkit_Modules", 
     [Parameter(Mandatory=$false)][string]$Branch = "main",
     [Parameter(ValueFromRemainingArguments=$true)]$CatchAllParameters
 )
@@ -38,11 +38,10 @@ try {
     $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll" -Recurse | Select-Object -First 1
     $GuiDll = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll" -Recurse | Select-Object -First 1
 
-    # Safe loading: Prevents crashes if a child module already loaded the DLLs
     try { Add-Type -Path $NStackDll.FullName -ErrorAction Stop } catch { }
     try { Add-Type -Path $GuiDll.FullName -ErrorAction Stop } catch { }
 
-    # --- [2] DYNAMIC GITHUB API ENUMERATION (Find Folders in Toolkit_Modules) ---
+    # --- [2] DYNAMIC GITHUB API ENUMERATION ---
     Write-OrchestratorLog "INFO" "Querying GitHub API for available modules in $TargetRepo..."
     
     $global:MasterMenuItems = @()
@@ -57,7 +56,6 @@ try {
             $ApiResponse = Invoke-RestMethod -Uri $ApiUrl -ErrorAction Stop
         }
 
-        # Filter for DIRECTORIES only, ignoring hidden folders (like .github)
         $DiscoveredDirs = $ApiResponse | Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } | Sort-Object name
 
         foreach ($Dir in $DiscoveredDirs) {
@@ -77,7 +75,6 @@ try {
 
     while (-not $global:ExitMaster) {
         
-        # --- DYNAMIC RIGHT PANE BUILDER ---
         $global:UpdateMasterRightPane = {
             param($ItemIndex)
             
@@ -103,10 +100,17 @@ try {
             $global:MasterDescView.SetNeedsDisplay()
         }
 
+        # --- ENVIRONMENT BYPASS PATCH ---
+        # Hides the terminal type from the GUI library so it forces the Windows drivers instead of Linux (stty)
+        $BackupTerm = $env:TERM
+        $env:TERM = $null
+
         [Terminal.Gui.Application]::Init()
         $Top = [Terminal.Gui.Application]::Top
+        
+        $env:TERM = $BackupTerm 
+        # --------------------------------
 
-        # A sleek dark-blue color scheme for the Master Menu
         $ColorSetup = New-Object Terminal.Gui.ColorScheme
         $ColorSetup.Normal = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::White, [Terminal.Gui.Color]::Blue)
         $ColorSetup.Focus = [Terminal.Gui.Attribute]::Make([Terminal.Gui.Color]::Black, [Terminal.Gui.Color]::Cyan)
@@ -159,14 +163,8 @@ try {
         # --- [4] DYNAMIC MODULE INJECTION ---
         if ($global:TargetModule) {
             Clear-Host
-            
             $CacheBuster = [guid]::NewGuid().ToString()
-            # Construct the path to the selected module's Entry.ps1
             $FetchUrl = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
-            
-            Write-Host "`n=================================================================" -ForegroundColor DarkCyan
-            Write-Host " INJECTING MODULE ENVELOPE: $($global:TargetModule) " -ForegroundColor Cyan
-            Write-Host "=================================================================" -ForegroundColor DarkCyan
             
             try {
                 if ($AuthHeader) {
@@ -175,7 +173,6 @@ try {
                     $ModuleCode = Invoke-RestMethod -Uri $FetchUrl -UseBasicParsing
                 }
                 
-                # Execute the child Entry.ps1
                 $ScriptBlock = [scriptblock]::Create($ModuleCode)
                 . $ScriptBlock
 
