@@ -24,7 +24,12 @@ if ($global:ToolkitTargetRepo) { $TargetRepo = $global:ToolkitTargetRepo }
 if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 
 function Write-Log { param($Level,$Message)
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$Level] $Message" -ForegroundColor DarkGray
+    if ($Global:DebugSync -and $Global:DebugSync.Running -and (Get-Command Write-DebugWindow -EA SilentlyContinue)) {
+        $safeLevel = if ($Level -in @('INFO','WARN','ERROR','DEBUG')) { $Level } else { 'INFO' }
+        Write-DebugWindow -Message "[$Level] $Message" -Level $safeLevel
+    } else {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$Level] $Message" -ForegroundColor DarkGray
+    }
 }
 
 try {
@@ -337,7 +342,11 @@ try {
                 . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule
 
             } catch {
-                Write-Host "`n[!] CRASH fetching or running $($global:TargetModule): $($_.Exception.Message)" -ForegroundColor Red
+                $errMsg = "[!] CRASH in $($global:TargetModule): $($_.Exception.Message)"
+                Write-Host "`n$errMsg" -ForegroundColor Red
+                if ($Global:DebugSync -and $Global:DebugSync.Running -and (Get-Command Write-DebugWindow -EA SilentlyContinue)) {
+                    Write-DebugWindow $errMsg -Level ERROR
+                }
             }
 
             Write-Host "`n─────────────────────────────────────────────" -ForegroundColor DarkGray

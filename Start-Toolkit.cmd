@@ -178,104 +178,46 @@ function Show-ConfigMenu {
                     Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red
                     Start-Sleep -Seconds 2; continue
                 }
-                $Cfg       = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-                $DbgOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
-                $DbgRepo   = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
-                $DbgBranch = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
-                $DbgApp    = "Toolkit_App"
-                $TempPath  = Join-Path $env:TEMP "tk_debug_$(Get-Random).ps1"
+                try {
+                    $Cfg   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                    $Token = Get-DecodedToken -Config $Cfg
 
-                # Single-quoted here-string — no $ escaping needed; placeholders swapped below
-                $Bootstrap = @'
-$Host.UI.RawUI.WindowTitle = "Toolkit"
-$ConfigFile = '__CFG__'
-$Owner  = '__OWNER__'
-$Repo   = '__REPO__'
-$Branch = '__BRANCH__'
-$App    = '__APP__'
+                    $global:ToolkitAuthHeader = @{ Authorization = "Bearer $Token" }
+                    $global:ToolkitPAT        = $Token
+                    $global:ToolkitRepoOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
+                    $global:ToolkitTargetRepo = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
+                    $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
+                    $global:ToolkitDebugMode  = $true
 
-$Config   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-Write-Host "`n=== PROFILE ACCESS VALIDATION ===" -ForegroundColor Yellow
-$Username = Read-Host "Identify User Profile"
-if (-not $Config.Users.$Username) {
-    Write-Host "[!] Profile not found." -ForegroundColor Red
-    Read-Host "Press Enter to exit"; exit
-}
-Write-Host "Enter Security PIN for '$Username': " -NoNewline -ForegroundColor White
-$SecurePin = Read-Host -AsSecureString
-$BSTR    = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePin)
-$UserPin = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-Write-Host ""
+                    $DbgScript = Join-Path $ScriptRootPath 'DebugWindow.ps1'
+                    if (Test-Path $DbgScript) {
+                        . $DbgScript
+                        Start-DebugWindow
+                        Start-Sleep -Milliseconds 800
 
-$Enc  = $Config.Users.$Username
-$Segs = $Enc.Split('|')
-$SecretKey = "$UserPin$($Segs[0])".PadRight(32).Substring(0,32)
-$Mixed = [System.Convert]::FromBase64String($Segs[1])
-$KeyB  = [System.Text.Encoding]::Unicode.GetBytes($SecretKey)
-$DecB  = New-Object byte[] $Mixed.Length
-for($i=0;$i -lt $Mixed.Length;$i++){$DecB[$i]=$Mixed[$i] -bxor $KeyB[$i % $KeyB.Length]}
-$Token = [System.Text.Encoding]::Unicode.GetString($DecB).Trim().Replace("`0","")
-
-$TokenSnip  = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
-$AuthHeader = @{ Authorization = "Bearer $Token" }
-
-Clear-Host
-Write-Host "=====================================================================" -ForegroundColor Yellow
-Write-Host "                     LIVE ENVIRONMENT RUNTIME DEBUG                  " -ForegroundColor Yellow
-Write-Host "=====================================================================" -ForegroundColor Yellow
-Write-Host "  * Target Repository : $Owner/$Repo [$Branch]" -ForegroundColor Gray
-Write-Host "  * Token Preview     : $TokenSnip" -ForegroundColor Gray
-Write-Host "=====================================================================" -ForegroundColor Yellow
-
-Write-Host "`n[DEBUG] Testing cloud connectivity to Private Modules via API..." -ForegroundColor Cyan
-try {
-    $res = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" `
-        -Headers $AuthHeader -Method Get -UseBasicParsing
-    Write-Host "[DEBUG] SUCCESS: API clean. Discovered $($res.Count) items." -ForegroundColor Green
-} catch {
-    Write-Host "[DEBUG] FAILURE: $($_.Exception.Message)" -ForegroundColor Red
-}
-
-Read-Host "`nPress [Enter] to launch TUI (or Ctrl+C to abort)"
-
-$global:ToolkitAuthHeader = $AuthHeader
-$global:ToolkitPAT        = $Token
-$global:ToolkitRepoOwner  = $Owner
-$global:ToolkitTargetRepo = $Repo
-$global:ToolkitBranch     = $Branch
-$cb   = [guid]::NewGuid().ToString()
-$LocalEntry = '__LOCAL_ENTRY__'
-if (Test-Path $LocalEntry) {
-    Write-Host "[DEBUG] Using local Entry.ps1 (no CDN wait)" -ForegroundColor Magenta
-    $code = Get-Content -Path $LocalEntry -Raw
-} else {
-    $cb   = [guid]::NewGuid().ToString()
-    $code = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$Owner/$App/$Branch/Entry.ps1?t=$cb" -UseBasicParsing
-}
-. ([scriptblock]::Create($code)) -AuthHeader $AuthHeader -RepoOwner $Owner -TargetRepo $Repo -Branch $Branch
-Remove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue
-'@
-                $Bootstrap = $Bootstrap.Replace('__CFG__',         $ConfigFile)
-                $Bootstrap = $Bootstrap.Replace('__OWNER__',       $DbgOwner)
-                $Bootstrap = $Bootstrap.Replace('__REPO__',        $DbgRepo)
-                $Bootstrap = $Bootstrap.Replace('__BRANCH__',      $DbgBranch)
-                $Bootstrap = $Bootstrap.Replace('__APP__',         $DbgApp)
-                $Bootstrap = $Bootstrap.Replace('__LOCAL_ENTRY__', (Join-Path $ScriptRootPath 'Entry.ps1'))
-                Set-Content -Path $TempPath -Value $Bootstrap -Encoding UTF8
-
-                # Start-Process (not & operator) spawns a detached process — no console inheritance
-                $Launched = $false
-                if (Get-Command wt -ErrorAction SilentlyContinue) {
-                    try {
-                        Start-Process wt -ArgumentList @("new-tab", "--title", "Toolkit", "--", "pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempPath) -ErrorAction Stop
-                        $Launched = $true
-                    } catch { }
+                        $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
+                        Write-DebugWindow "=== TOOLKIT DEBUG SESSION ===" -Level INFO
+                        Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
+                        Write-DebugWindow "Token  : $Snip" -Level INFO
+                        Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
+                        try {
+                            $Res = Invoke-RestMethod -Uri "https://api.github.com/repos/$($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo)/contents?ref=$($global:ToolkitBranch)" `
+                                -Headers $global:ToolkitAuthHeader -Method Get -UseBasicParsing
+                            Write-DebugWindow "API OK: $($Res.Count) items in /$($global:ToolkitTargetRepo) root" -Level INFO
+                        } catch {
+                            Write-DebugWindow "API FAIL: $($_.Exception.Message)" -Level ERROR
+                        }
+                        Write-DebugWindow "Launching TUI with local Entry.ps1..." -Level INFO
+                    } else {
+                        Write-Host "[!] DebugWindow.ps1 not found — run: git pull" -ForegroundColor Red
+                        Read-Host "Press [Enter] to continue"
+                    }
+                    return   # exit Show-ConfigMenu; production handoff picks up below
+                } catch {
+                    Write-Host "`n[!] Auth failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Read-Host "Press [Enter] to return to menu"
                 }
-                if (-not $Launched) {
-                    Start-Process pwsh -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $TempPath) -WindowStyle Normal
-                }
-                Write-Host "[+] Debug session launching in separate window..." -ForegroundColor Green
-                Start-Sleep -Milliseconds 600
+
             }
             "2" { New-UserTokenConfig }
             "3" {
@@ -334,28 +276,34 @@ try {
         throw "Configuration file missing at: $ConfigFile. Hold down the SHIFT key on boot to open the setup menu."
     }
 
-    $Config = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-    $YourToken = Get-DecodedToken -Config $Config
+    # --- [4] AUTH — skip if debug mode already set globals via option 1 ---
+    if (-not $global:ToolkitAuthHeader) {
+        $Config    = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+        $YourToken = Get-DecodedToken -Config $Config
 
-    # --- [4] GLOBAL DOWNSTREAM INHERITANCE INJECTION ---
-    # Shotgun the token into standard environmental variables to fix the 404
-    # This guarantees the Entry.ps1 orchestrator inherits full private access rights
-    $global:ToolkitAuthHeader = @{ "Authorization" = "Bearer $YourToken" } 
-    $env:GITHUB_TOKEN         = $YourToken
-    $global:GITHUB_TOKEN      = $YourToken
-    $global:ToolkitPAT        = $YourToken
-    
-    $global:ToolkitRepoOwner  = if ($Config.Settings.PublicOwner) { $Config.Settings.PublicOwner } else { "skrogman" }
-    $global:ToolkitTargetRepo = if ($Config.Settings.PublicRepo) { $Config.Settings.PublicRepo } else { "Toolkit_Modules" }
-    $global:ToolkitBranch     = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
+        $global:ToolkitAuthHeader = @{ "Authorization" = "Bearer $YourToken" }
+        $env:GITHUB_TOKEN         = $YourToken
+        $global:GITHUB_TOKEN      = $YourToken
+        $global:ToolkitPAT        = $YourToken
+        $global:ToolkitRepoOwner  = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
+        $global:ToolkitTargetRepo = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
+        $global:ToolkitBranch     = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
+    }
 
-    # --- [5] STANDARD PRODUCTION HANDOFF ---
-    $CacheBuster = [guid]::NewGuid().ToString()
-    $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$($global:ToolkitRepoOwner)/Toolkit_App/$($global:ToolkitBranch)/Entry.ps1?t=$CacheBuster"
+    # --- [5] LOAD ENTRY.PS1 — local file in debug mode, CDN otherwise ---
+    $LocalEntry = Join-Path $ScriptRootPath 'Entry.ps1'
+    if ($global:ToolkitDebugMode -and (Test-Path $LocalEntry)) {
+        if ($Global:DebugSync -and $Global:DebugSync.Running) {
+            Write-DebugWindow "Loading local Entry.ps1 (debug mode — no CDN)" -Level DEBUG
+        }
+        $MasterCode = Get-Content -Path $LocalEntry -Raw
+    } else {
+        $CacheBuster           = [guid]::NewGuid().ToString()
+        $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$($global:ToolkitRepoOwner)/Toolkit_App/$($global:ToolkitBranch)/Entry.ps1?t=$CacheBuster"
+        $MasterCode            = Invoke-RestMethod -Uri $MasterOrchestratorUrl -UseBasicParsing
+    }
 
-    $MasterCode = Invoke-RestMethod -Uri $MasterOrchestratorUrl -UseBasicParsing
     $ScriptBlock = [scriptblock]::Create($MasterCode)
-
     Clear-Host
     . $ScriptBlock -AuthHeader $global:ToolkitAuthHeader -RepoOwner $global:ToolkitRepoOwner -TargetRepo $global:ToolkitTargetRepo -Branch $global:ToolkitBranch
 
