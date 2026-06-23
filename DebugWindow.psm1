@@ -29,8 +29,8 @@ function Start-DebugWindow {
 
         # XAML Layout for the GUI Window
         [xml]$xaml = @"
-        <Window xmlns="http://schemas.microsoft.com/winfx/2000/xaml/presentation"
-                Title="PowerShell Live Debug Console" Height="550" Width="750" Topmost="True">
+        <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                Title="Toolkit Live Debug Console" Height="550" Width="820" Topmost="True">
             <Grid Background="#F4F4F5">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
