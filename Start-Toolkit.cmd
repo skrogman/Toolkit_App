@@ -163,62 +163,39 @@ function Show-ConfigMenu {
         Write-Host "=====================================================================" -ForegroundColor Yellow
         Write-Host "             IR TOOLKIT - LOCAL ADMINISTRATION PANEL                  " -ForegroundColor Yellow
         Write-Host "=====================================================================" -ForegroundColor Yellow
-        Write-Host "  1) Launch Cloud Diagnostics (Debug Engine Mode)" -ForegroundColor Cyan
+        Write-Host "  1) Open Debug Console" -ForegroundColor Cyan
         Write-Host "  2) Roll / Encode New User PAT (Add/Update User with PIN)" -ForegroundColor Cyan
         Write-Host "  3) List Currently Configured Users" -ForegroundColor Cyan
         Write-Host "  4) Exit Administration Panel and Start Production Handoff" -ForegroundColor Green
         Write-Host "  5) Abort & Exit Completely" -ForegroundColor Red
         Write-Host "  6) Relaunch as Administrator" -ForegroundColor Magenta
+        Write-Host "  7) Authenticate & Launch Toolkit" -ForegroundColor Green
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
-        $MenuChoice = Read-Host "Select an administration option [1-6]"
+        $MenuChoice = Read-Host "Select an administration option [1-7]"
 
         switch ($MenuChoice.Trim()) {
             "1" {
-                if (-not (Test-Path $ConfigFile)) {
-                    Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red
-                    Start-Sleep -Seconds 2; continue
+                if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                    Write-Host "[!] Debug console is already open." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 1; continue
                 }
                 try {
-                    $Cfg   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-                    $Token = Get-DecodedToken -Config $Cfg
-
-                    $global:ToolkitAuthHeader = @{ Authorization = "Bearer $Token" }
-                    $global:ToolkitPAT        = $Token
-                    $global:ToolkitRepoOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
-                    $global:ToolkitTargetRepo = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
-                    $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
-                    $global:ToolkitDebugMode  = $true
-
-                    # Fetch DebugWindow.psm1 from the public Toolkit_App repo (no local disk dependency)
                     Write-Host "[*] Fetching debug module from Toolkit_App repo..." -ForegroundColor DarkGray
                     $DbgTemp = Join-Path $env:TEMP "DebugWindow.psm1"
                     $cb = [guid]::NewGuid().ToString()
                     Invoke-RestMethod -Uri "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$cb" -OutFile $DbgTemp -UseBasicParsing
                     Import-Module $DbgTemp -Force -ErrorAction Stop
-
                     Start-DebugWindow
                     Start-Sleep -Milliseconds 800
-
-                    $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
-                    Write-DebugWindow "=== TOOLKIT DEBUG SESSION ===" -Level INFO
-                    Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
-                    Write-DebugWindow "Token  : $Snip" -Level INFO
-                    Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
-                    try {
-                        $Res = Invoke-RestMethod -Uri "https://api.github.com/repos/$($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo)/contents?ref=$($global:ToolkitBranch)" `
-                            -Headers $global:ToolkitAuthHeader -Method Get -UseBasicParsing
-                        Write-DebugWindow "API OK: $($Res.Count) items in /$($global:ToolkitTargetRepo) root" -Level INFO
-                    } catch {
-                        Write-DebugWindow "API FAIL: $($_.Exception.Message)" -Level ERROR
-                    }
-                    Write-DebugWindow "Launching TUI with local Entry.ps1..." -Level INFO
-                    return   # exit Show-ConfigMenu; production handoff picks up below
+                    Write-DebugWindow "=== TOOLKIT DEBUG CONSOLE ===" -Level INFO
+                    $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                    Write-DebugWindow "Running as Administrator: $IsAdmin" -Level INFO
+                    Write-DebugWindow "Select option 7 to authenticate and launch, or 6 to relaunch elevated." -Level INFO
                 } catch {
-                    Write-Host "`n[!] Auth failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-Host "`n[!] Failed to launch debug console: $($_.Exception.Message)" -ForegroundColor Red
                     Read-Host "Press [Enter] to return to menu"
                 }
-
             }
             "2" { New-UserTokenConfig }
             "3" {
@@ -235,12 +212,54 @@ function Show-ConfigMenu {
                 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
                 if ($IsAdmin) {
                     Write-Host "`n[!] Already running as Administrator." -ForegroundColor Yellow
+                    if ($Global:DebugSync -and $Global:DebugSync.Running) { Write-DebugWindow "Already elevated — no relaunch needed." -Level WARN }
                     Start-Sleep -Seconds 2
                 } else {
+                    if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                        Write-DebugWindow "Relaunching as Administrator — this console will close." -Level WARN
+                        Start-Sleep -Milliseconds 600
+                    }
                     $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
                     Write-Host "`n[*] Relaunching as Administrator..." -ForegroundColor Magenta
                     Start-Process -FilePath $CmdFile -Verb RunAs
                     Exit
+                }
+            }
+            "7" {
+                if (-not (Test-Path $ConfigFile)) {
+                    Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red
+                    Start-Sleep -Seconds 2; continue
+                }
+                try {
+                    $Cfg   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                    $Token = Get-DecodedToken -Config $Cfg
+
+                    $global:ToolkitAuthHeader = @{ Authorization = "Bearer $Token" }
+                    $global:ToolkitPAT        = $Token
+                    $global:ToolkitRepoOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
+                    $global:ToolkitTargetRepo = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
+                    $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
+                    $global:ToolkitDebugMode  = ($Global:DebugSync -and $Global:DebugSync.Running)
+
+                    if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                        $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
+                        Write-DebugWindow "=== AUTHENTICATION ===" -Level INFO
+                        Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
+                        Write-DebugWindow "Token  : $Snip" -Level INFO
+                        Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
+                        try {
+                            $Res = Invoke-RestMethod -Uri "https://api.github.com/repos/$($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo)/contents?ref=$($global:ToolkitBranch)" `
+                                -Headers $global:ToolkitAuthHeader -Method Get -UseBasicParsing
+                            Write-DebugWindow "API OK — $($Res.Count) items in repo root" -Level INFO
+                        } catch {
+                            Write-DebugWindow "API FAIL: $($_.Exception.Message)" -Level ERROR
+                        }
+                        Write-DebugWindow "Handing off to TUI..." -Level INFO
+                    }
+                    return
+                } catch {
+                    Write-Host "`n[!] Auth failed: $($_.Exception.Message)" -ForegroundColor Red
+                    Read-Host "Press [Enter] to return to menu"
                 }
             }
         }
