@@ -14,10 +14,14 @@ param (
 $ErrorActionPreference = "Stop"
 
 # Inherit token from Start-Toolkit globals when not passed as a param
-if (-not $AuthHeader -and $global:ToolkitAuthHeader) { $AuthHeader  = $global:ToolkitAuthHeader }
-if (-not $RepoOwner  -and $global:ToolkitRepoOwner)  { $RepoOwner   = $global:ToolkitRepoOwner  }
-if (-not $TargetRepo -and $global:ToolkitTargetRepo) { $TargetRepo  = $global:ToolkitTargetRepo }
-if (-not $Branch     -and $global:ToolkitBranch)     { $Branch      = $global:ToolkitBranch     }
+if (-not $AuthHeader) {
+    if     ($global:ToolkitAuthHeader)              { $AuthHeader = $global:ToolkitAuthHeader }
+    elseif ($global:ToolkitPAT)                     { $AuthHeader = @{ Authorization = "Bearer $global:ToolkitPAT" } }
+    elseif ($env:GITHUB_TOKEN)                      { $AuthHeader = @{ Authorization = "Bearer $env:GITHUB_TOKEN"  } }
+}
+if ($global:ToolkitRepoOwner)  { $RepoOwner  = $global:ToolkitRepoOwner  }
+if ($global:ToolkitTargetRepo) { $TargetRepo = $global:ToolkitTargetRepo }
+if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 
 function Write-Log { param($Level,$Message)
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$Level] $Message" -ForegroundColor DarkGray
@@ -44,8 +48,9 @@ try {
     $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll"        -Recurse | Select-Object -First 1
     $GuiDll    = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll"  -Recurse | Select-Object -First 1
 
-    try { Add-Type -Path $NStackDll.FullName -ErrorAction Stop } catch { }
-    try { Add-Type -Path $GuiDll.FullName    -ErrorAction Stop } catch { }
+    # Assembly::LoadFrom skips .NET CLS compliance checks that Add-Type triggers on Terminal.Gui.Key
+    try { [System.Reflection.Assembly]::LoadFrom($NStackDll.FullName) | Out-Null } catch { }
+    try { [System.Reflection.Assembly]::LoadFrom($GuiDll.FullName)    | Out-Null } catch { }
 
     # ----------------------------------------------------------------
     # [2] DYNAMIC MODULE DISCOVERY  (with synopsis fetch)
