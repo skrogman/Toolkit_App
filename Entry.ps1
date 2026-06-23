@@ -55,6 +55,7 @@ try {
     # ----------------------------------------------------------------
     # [2] DYNAMIC MODULE DISCOVERY  (with synopsis fetch)
     # ----------------------------------------------------------------
+    Write-Log "INFO" "Auth: $(if ($AuthHeader) { 'Active (token present)' } else { 'None — private repo will 404' })"
     Write-Log "INFO" "Querying GitHub API — $RepoOwner/$TargetRepo @ $Branch..."
 
     $global:Modules = [System.Collections.Generic.List[hashtable]]::new()
@@ -128,7 +129,7 @@ try {
         # ── Root window ────────────────────────────────────────────
         $Win = New-Object Terminal.Gui.Window
         $Win.ColorScheme = $SchemeApp
-        $Win.Height = [Terminal.Gui.Dim]::Fill() - 1
+        $Win.Height = [Terminal.Gui.Dim]::Fill()
         $Top.Add($Win)
 
         # ── Header bar ─────────────────────────────────────────────
@@ -145,7 +146,7 @@ try {
         $ListFrame.X           = 0
         $ListFrame.Y           = 2
         $ListFrame.Width       = [Terminal.Gui.Dim]::Percent(36)
-        $ListFrame.Height      = [Terminal.Gui.Dim]::Fill()
+        $ListFrame.Height      = [Terminal.Gui.Dim]::Fill() - 1
         $ListFrame.ColorScheme = $SchemeApp
         $Win.Add($ListFrame)
 
@@ -163,7 +164,7 @@ try {
         $InfoFrame.X           = [Terminal.Gui.Pos]::Right($ListFrame) + 1
         $InfoFrame.Y           = 2
         $InfoFrame.Width       = [Terminal.Gui.Dim]::Fill()
-        $InfoFrame.Height      = [Terminal.Gui.Dim]::Fill()
+        $InfoFrame.Height      = [Terminal.Gui.Dim]::Fill() - 1
         $InfoFrame.ColorScheme = $SchemeApp
         $Win.Add($InfoFrame)
 
@@ -233,14 +234,13 @@ try {
         }
         [void]$ListView.add_OpenSelectedItem($OnItemOpened)
 
-        # ── Status bar ─────────────────────────────────────────────
-        $Noop       = [System.Action]{ }
-        $StatusBar  = New-Object Terminal.Gui.StatusBar([Terminal.Gui.StatusItem[]]@(
-            (New-Object Terminal.Gui.StatusItem([Terminal.Gui.Key]::Null, "↑↓ Navigate",     $Noop)),
-            (New-Object Terminal.Gui.StatusItem([Terminal.Gui.Key]::Null, "Enter: Launch",   $Noop)),
-            (New-Object Terminal.Gui.StatusItem([Terminal.Gui.Key]::Null, "Vault: $RepoOwner/$TargetRepo [$Branch]", $Noop))
-        ))
-        $Top.Add($StatusBar)
+        # ── Nav hint label (replaces StatusBar — avoids Terminal.Gui.Key CLS crash) ──
+        $NavLabel = New-Object Terminal.Gui.Label("  ↑↓ Navigate   Enter: Launch Module   Vault: $RepoOwner/$TargetRepo [$Branch]  ")
+        $NavLabel.X           = 0
+        $NavLabel.Y           = [Terminal.Gui.Pos]::AnchorEnd(1)
+        $NavLabel.Width       = [Terminal.Gui.Dim]::Fill()
+        $NavLabel.ColorScheme = $SchemeHeader
+        $Win.Add($NavLabel)
 
         [Terminal.Gui.Application]::Run()
         [Terminal.Gui.Application]::Shutdown()
