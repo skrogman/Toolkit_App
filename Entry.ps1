@@ -53,35 +53,91 @@ try {
     try { [System.Reflection.Assembly]::LoadFrom($GuiDll.FullName)    | Out-Null } catch { }
 
     # ----------------------------------------------------------------
-    # [2] DYNAMIC MODULE DISCOVERY  (with synopsis fetch)
+    # [2] DYNAMIC MODULE DISCOVERY  (full inventory per module)
     # ----------------------------------------------------------------
     Write-Log "INFO" "Auth: $(if ($AuthHeader) { 'Active (token present)' } else { 'None — private repo will 404' })"
     Write-Log "INFO" "Querying GitHub API — $RepoOwner/$TargetRepo @ $Branch..."
 
     $global:Modules = [System.Collections.Generic.List[hashtable]]::new()
 
-    $ApiParams = @{ Uri = "https://api.github.com/repos/$RepoOwner/$TargetRepo/contents?ref=$Branch"; ErrorAction = "Stop" }
-    if ($AuthHeader) { $ApiParams.Headers = $AuthHeader }
+    $ApiBase   = "https://api.github.com/repos/$RepoOwner/$TargetRepo"
+    $RootParams = @{ Uri = "$ApiBase/contents?ref=$Branch"; ErrorAction = "Stop" }
+    if ($AuthHeader) { $RootParams.Headers = $AuthHeader }
 
     try {
-        $Dirs = (Invoke-RestMethod @ApiParams) |
+        $Dirs = (Invoke-RestMethod @RootParams) |
                 Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } |
                 Sort-Object name
 
         foreach ($Dir in $Dirs) {
-            $Synopsis = "IR & Admin module — press Enter to launch."
-            try {
-                $RawParams = @{ Uri = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($Dir.name)/Entry.ps1"; UseBasicParsing = $true; ErrorAction = "Stop" }
-                if ($AuthHeader) { $RawParams.Headers = $AuthHeader }
-                $Raw = Invoke-RestMethod @RawParams
-                if ($Raw -match '(?ms)<#.*?\.SYNOPSIS\s+(.*?)(?:\r?\n\s*\.[A-Z]|\r?\n\s*#>)') {
-                    $s = ($Matches[1] -replace '\r?\n',' ' -replace '\s+',' ').Trim()
-                    if ($s) { $Synopsis = $s }
-                }
-            } catch { }
+            Write-Log "INFO" "  Inventorying: $($Dir.name)"
+            $Synopsis  = "IR & Admin module."
+            $Scripts   = [System.Collections.Generic.List[hashtable]]::new()
 
-            $global:Modules.Add(@{ Name = $Dir.name; Synopsis = $Synopsis })
-            Write-Log "INFO" "  Discovered: $($Dir.name)"
+            try {
+                # Get full directory listing
+                $DirParams = @{ Uri = "$ApiBase/contents/$($Dir.name)?ref=$Branch"; ErrorAction = "Stop" }
+                if ($AuthHeader) { $DirParams.Headers = $AuthHeader }
+                $DirItems = Invoke-RestMethod @DirParams
+
+                $Ps1Files = $DirItems | Where-Object { $_.type -eq 'file' -and $_.name -like '*.ps1' } | Sort-Object name
+
+                foreach ($File in $Ps1Files) {
+                    $Desc = ""
+                    try {
+                        $FetchParams = @{ Uri = $File.download_url; UseBasicParsing = $true; ErrorAction = "Stop" }
+                        if ($AuthHeader) { $FetchParams.Headers = $AuthHeader }
+                        $Raw = Invoke-RestMethod @FetchParams
+
+                        # Prefer .SYNOPSIS, fall back to .DESCRIPTION
+                        if ($Raw -match '(?ms)<#.*?\.SYNOPSIS\s+(.*?)(?:\r?\n\s*\.[A-Z]|\r?\n\s*#>)') {
+                            $Desc = ($Matches[1] -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                        } elseif ($Raw -match '(?ms)<#.*?\.DESCRIPTION\s+(.*?)(?:\r?\n\s*\.[A-Z]|\r?\n\s*#>)') {
+                            $Desc = ($Matches[1] -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                        }
+                    } catch { }
+
+                    if ($File.name -eq 'Entry.ps1') {
+                        if ($Desc) { $Synopsis = $Desc }
+                    } else {
+                        $Scripts.Add(@{ Name = $File.name -replace '\.ps1$',''; Desc = $Desc })
+                    }
+                }
+
+                # Also discover subdirectories (e.g. PoC has phase files)
+                $SubDirs = $DirItems | Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' }
+                foreach ($Sub in $SubDirs) {
+                    try {
+                        $SubParams = @{ Uri = "$ApiBase/contents/$($Dir.name)/$($Sub.name)?ref=$Branch"; ErrorAction = "Stop" }
+                        if ($AuthHeader) { $SubParams.Headers = $AuthHeader }
+                        $SubItems = Invoke-RestMethod @SubParams
+                        $SubPs1   = $SubItems | Where-Object { $_.type -eq 'file' -and $_.name -like '*.ps1' } | Sort-Object name
+                        foreach ($SF in $SubPs1) {
+                            $Desc = ""
+                            try {
+                                $SFParams = @{ Uri = $SF.download_url; UseBasicParsing = $true; ErrorAction = "Stop" }
+                                if ($AuthHeader) { $SFParams.Headers = $AuthHeader }
+                                $Raw = Invoke-RestMethod @SFParams
+                                if ($Raw -match '(?ms)<#.*?\.SYNOPSIS\s+(.*?)(?:\r?\n\s*\.[A-Z]|\r?\n\s*#>)') {
+                                    $Desc = ($Matches[1] -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                                } elseif ($Raw -match '(?ms)<#.*?\.DESCRIPTION\s+(.*?)(?:\r?\n\s*\.[A-Z]|\r?\n\s*#>)') {
+                                    $Desc = ($Matches[1] -replace '\r?\n',' ' -replace '\s+',' ').Trim()
+                                }
+                            } catch { }
+                            $Scripts.Add(@{ Name = "$($Sub.name)/$($SF.name -replace '\.ps1$','')"; Desc = $Desc })
+                        }
+                    } catch { }
+                }
+
+            } catch {
+                Write-Log "WARN" "    Could not inventory $($Dir.name): $($_.Exception.Message)"
+            }
+
+            $global:Modules.Add(@{
+                Name      = $Dir.name
+                Synopsis  = $Synopsis
+                Scripts   = $Scripts
+            })
         }
     } catch {
         Write-Log "ERROR" "GitHub API error: $($_.Exception.Message)"
@@ -182,7 +238,6 @@ try {
             param($Index)
 
             if ($Index -ge $global:Modules.Count) {
-                # Exit row
                 $t  = "`n  EXIT`n"
                 $t += "  ══════════════════════════════`n`n"
                 $t += "  Close the TUI and return`n"
@@ -190,23 +245,41 @@ try {
                 $t += "  Press [Enter] to confirm."
             } else {
                 $m  = $global:Modules[$Index]
+
                 $t  = "`n  $($m.Name.ToUpper())`n"
                 $t += "  ══════════════════════════════`n`n"
-                # Word-wrap synopsis at ~34 chars
+
+                # Word-wrap synopsis at ~38 chars
                 $words = $m.Synopsis -split '\s+'
-                $line  = "  "; $lines = @()
+                $line  = "  "; $wrapped = @()
                 foreach ($w in $words) {
-                    if (($line + $w).Length -gt 36) { $lines += $line.TrimEnd(); $line = "  $w " }
+                    if (($line + $w).Length -gt 40) { $wrapped += $line.TrimEnd(); $line = "  $w " }
                     else { $line += "$w " }
                 }
-                if ($line.Trim()) { $lines += $line.TrimEnd() }
-                $t += ($lines -join "`n") + "`n`n"
-                $t += "  ──────────────────────────────`n"
+                if ($line.Trim()) { $wrapped += $line.TrimEnd() }
+                $t += ($wrapped -join "`n") + "`n"
+
+                # Script inventory
+                $t += "`n  ── SCRIPTS ($($m.Scripts.Count + 1) files) ──────────`n"
+                $t += "  ◆ Entry.ps1`n"
+                foreach ($s in $m.Scripts) {
+                    $label = "  ◇ $($s.Name)"
+                    if ($s.Desc) {
+                        $maxDesc = 38 - $label.Length
+                        $descTrim = if ($s.Desc.Length -gt $maxDesc -and $maxDesc -gt 3) {
+                            $s.Desc.Substring(0, $maxDesc - 3) + "..."
+                        } else { $s.Desc }
+                        $t += "$label  $descTrim`n"
+                    } else {
+                        $t += "$label`n"
+                    }
+                }
+
+                $t += "`n  ──────────────────────────────`n"
                 $t += "  Vault  : $RepoOwner/$TargetRepo`n"
                 $t += "  Branch : $Branch`n"
                 $t += "  Path   : /$($m.Name)/Entry.ps1`n`n"
-                $t += "  Press [Enter] to pull and`n"
-                $t += "  inject into runspace."
+                $t += "  Press [Enter] to launch."
             }
 
             $global:InfoView.Text = $t
