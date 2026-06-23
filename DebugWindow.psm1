@@ -1,212 +1,161 @@
-# ==============================================================================
-# PowerShell Live Asynchronous Debug Window Module
-# ==============================================================================
-
-# Global thread-safe synchronization state
 $Global:DebugSync = [hashtable]::Synchronized(@{
-    Queue   = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    LogFile = $null
     Running = $false
-    PowerShellInstance = $null
+    WpfProc = $null
 })
 
 function Start-DebugWindow {
-    <#
-    .SYNOPSIS
-        Launches the separate, asynchronous WPF Debug Window.
-    #>
-    if ($Global:DebugSync.Running) {
-        Write-Warning "Debug window is already running."
-        return
+    $logFile  = Join-Path $env:TEMP "toolkit_debug_active.log"
+    $pidFile  = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    $uiScript = Join-Path $env:TEMP "toolkit_debug_ui.ps1"
+
+    # Check if an existing window process is still alive (survives elevation relaunch)
+    if (Test-Path $pidFile) {
+        $savedPid = [int](Get-Content $pidFile -Raw).Trim()
+        $existing = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+        if ($existing -and -not $existing.HasExited) {
+            $Global:DebugSync.LogFile = $logFile
+            $Global:DebugSync.WpfProc = $existing
+            $Global:DebugSync.Running = $true
+            Write-Host "Reconnected to existing debug console (PID $savedPid)." -ForegroundColor Green
+            return
+        }
     }
 
-    $Global:DebugSync.Running = $true
+    # Fresh launch — clear log file and write the WPF UI script
+    [System.IO.File]::WriteAllText($logFile, "", [System.Text.Encoding]::UTF8)
 
-    # Code block that runs inside the separate UI thread
-    $UiScript = {
-        Param($sync)
+    $wpfCode = @'
+param([string]$LogFile)
+Add-Type -AssemblyName PresentationFramework, WindowsBase
 
-        Add-Type -AssemblyName PresentationFramework, WindowsBase, System.Drawing
-
-        # XAML Layout for the GUI Window
-        [xml]$xaml = @"
-        <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-                Title="Toolkit Live Debug Console" Height="550" Width="820" Topmost="True">
-            <Grid Background="#F4F4F5">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
-
-                <ToolBar Grid.Row="0" Background="#E4E4E7" ToolBarTray.IsLocked="True">
-                    <Label Content="Filter Logs:" VerticalAlignment="Center" FontWeight="Bold" Margin="5,0"/>
-                    <TextBox Name="txtSearch" Width="250" VerticalAlignment="Center" Margin="5,2" Padding="3"/>
-                    <Button Name="btnFilter" Content=" Apply Filter " Margin="5,2" Padding="5,2" Background="#0EA5E9" Foreground="White" BorderThickness="0"/>
-                    <Button Name="btnClearFilter" Content=" Reset " Margin="2" Padding="5,2"/>
-                </ToolBar>
-
-                <TextBox Name="txtLogs" Grid.Row="1" FontFamily="Consolas" FontSize="12"
-                         AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                         IsReadOnly="True" Background="#18181B" Foreground="#A1A1AA" Padding="10"/>
-
-                <StatusBar Grid.Row="2" Background="#E4E4E7">
-                    <StatusBarItem HorizontalAlignment="Right">
-                        <StackPanel Orientation="Horizontal">
-                            <Button Name="btnClear" Content="Clear Screen" Width="100" Margin="2" Padding="3"/>
-                            <Button Name="btnSave" Content="Save Logs As..." Width="110" Margin="5,2" Padding="3" Background="#22C55E" Foreground="White" BorderThickness="0"/>
-                        </StackPanel>
-                    </StatusBarItem>
-                </StatusBar>
-            </Grid>
-        </Window>
+[xml]$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Toolkit Live Debug Console" Height="550" Width="820" Topmost="True">
+    <Grid Background="#F4F4F5">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <ToolBar Grid.Row="0" Background="#E4E4E7" ToolBarTray.IsLocked="True">
+            <Label Content="Filter:" VerticalAlignment="Center" FontWeight="Bold" Margin="5,0"/>
+            <TextBox Name="txtSearch" Width="260" VerticalAlignment="Center" Margin="5,2" Padding="3"/>
+            <Button Name="btnFilter" Content=" Apply " Margin="5,2" Padding="5,2" Background="#0EA5E9" Foreground="White" BorderThickness="0"/>
+            <Button Name="btnClearFilter" Content=" Reset " Margin="2" Padding="5,2"/>
+        </ToolBar>
+        <TextBox Name="txtLogs" Grid.Row="1" FontFamily="Consolas" FontSize="12"
+                 AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
+                 IsReadOnly="True" Background="#18181B" Foreground="#A1A1AA" Padding="10"/>
+        <StatusBar Grid.Row="2" Background="#E4E4E7">
+            <StatusBarItem HorizontalAlignment="Right">
+                <StackPanel Orientation="Horizontal">
+                    <Button Name="btnClear" Content="Clear"    Width="80"  Margin="2"   Padding="3"/>
+                    <Button Name="btnSave"  Content="Save As..." Width="100" Margin="5,2" Padding="3" Background="#22C55E" Foreground="White" BorderThickness="0"/>
+                </StackPanel>
+            </StatusBarItem>
+        </StatusBar>
+    </Grid>
+</Window>
 "@
 
-        # Load the window
-        $reader = New-Object System.Xml.XmlNodeReader $xaml
-        $window = [Windows.Markup.XamlReader]::Load($reader)
+$reader = New-Object System.Xml.XmlNodeReader $xaml
+$window = [Windows.Markup.XamlReader]::Load($reader)
 
-        # Connect to GUI elements
-        $txtSearch       = $window.FindName("txtSearch")
-        $btnFilter       = $window.FindName("btnFilter")
-        $btnClearFilter  = $window.FindName("btnClearFilter")
-        $txtLogs         = $window.FindName("txtLogs")
-        $btnSave         = $window.FindName("btnSave")
-        $btnClear        = $window.FindName("btnClear")
+$txtSearch      = $window.FindName("txtSearch")
+$btnFilter      = $window.FindName("btnFilter")
+$btnClearFilter = $window.FindName("btnClearFilter")
+$txtLogs        = $window.FindName("txtLogs")
+$btnSave        = $window.FindName("btnSave")
+$btnClear       = $window.FindName("btnClear")
 
-        # Internal storage array keeping track of logs for filtering/saving
-        $masterLogList = [System.Collections.Generic.List[string]]::new()
-        $script:ActiveFilter = ""
+$allLines            = [System.Collections.Generic.List[string]]::new()
+$script:ActiveFilter = ""
+$script:LastPos      = 0L
 
-        # Update function to handle filtering logic cleanly
-        $UpdateDisplay = {
-            if ([string]::IsNullOrWhiteSpace($script:ActiveFilter)) {
-                $txtLogs.Text = [string]::Join("`r`n", $masterLogList)
-            } else {
-                $filtered = $masterLogList | Where-Object { $_ -like "*$script:ActiveFilter*" }
-                $txtLogs.Text = [string]::Join("`r`n", $filtered)
-            }
-            $txtLogs.ScrollToEnd()
-        }
-
-        # WPF Dispatcher Timer to safely pull data from the background queue every 100ms
-        $timer = New-Object System.Windows.Threading.DispatcherTimer
-        $timer.Interval = [TimeSpan]::FromMilliseconds(100)
-        $timer.Add_Tick({
-            $incomingMsg = $null
-            $hasNewData = $false
-            while ($sync.Queue.TryDequeue([ref]$incomingMsg)) {
-                $masterLogList.Add($incomingMsg)
-                $hasNewData = $true
-            }
-            if ($hasNewData) {
-                $UpdateDisplay.Invoke()
-            }
-        })
-        $timer.Start()
-
-        # Event: Apply Filter Click
-        $btnFilter.Add_Click({
-            $script:ActiveFilter = $txtSearch.Text
-            $UpdateDisplay.Invoke()
-        })
-
-        # Event: Reset Filter Click
-        $btnClearFilter.Add_Click({
-            $txtSearch.Text = ""
-            $script:ActiveFilter = ""
-            $UpdateDisplay.Invoke()
-        })
-
-        # Event: Clear Display Log
-        $btnClear.Add_Click({
-            $masterLogList.Clear()
-            $txtLogs.Clear()
-        })
-
-        # Event: Native Windows Save Dialog
-        $btnSave.Add_Click({
-            $sfd = New-Object Microsoft.Win32.SaveFileDialog
-            $sfd.Filter = "Log Files (*.log)|*.log|Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
-            $sfd.Title = "Export Debug Logs"
-            $sfd.FileName = "Debug_Export_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-
-            if ($sfd.ShowDialog() -eq $true) {
-                try {
-                    [System.IO.File]::WriteAllLines($sfd.FileName, $masterLogList.ToArray())
-                    [System.Windows.MessageBox]::Show("Logs successfully saved to:`n$($sfd.FileName)", "Success", "OK", "Information")
-                } catch {
-                    [System.Windows.MessageBox]::Show("Failed to save file:`n$($_.Exception.Message)", "Error", "OK", "Error")
-                }
-            }
-        })
-
-        # Event: Cleanup when window is closed
-        $window.Add_Closed({
-            $timer.Stop()
-            $sync.Running = $false
-        })
-
-        # Open window
-        $window.ShowDialog() | Out-Null
+$UpdateDisplay = {
+    if ([string]::IsNullOrWhiteSpace($script:ActiveFilter)) {
+        $txtLogs.Text = [string]::Join("`r`n", $allLines)
+    } else {
+        $filtered = $allLines | Where-Object { $_ -like "*$script:ActiveFilter*" }
+        $txtLogs.Text = [string]::Join("`r`n", $filtered)
     }
+    $txtLogs.ScrollToEnd()
+}
 
-    # WPF requires STA threading — PowerShell 7 defaults to MTA, so create an explicit STA runspace
-    $sta = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $sta.ApartmentState = [System.Threading.ApartmentState]::STA
-    $sta.ThreadOptions  = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
-    $sta.Open()
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromMilliseconds(150)
+$timer.Add_Tick({
+    try {
+        $fs = [System.IO.File]::Open($LogFile, 'Open', 'Read', 'ReadWrite')
+        if ($fs.Length -gt $script:LastPos) {
+            $fs.Seek($script:LastPos, 'Begin') | Out-Null
+            $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+            $chunk = $sr.ReadToEnd()
+            $script:LastPos = $fs.Position
+            $sr.Dispose()
+            $newLines = $chunk -split "`r?`n" | Where-Object { $_ -ne "" }
+            foreach ($l in $newLines) { $allLines.Add($l) }
+            if ($newLines.Count -gt 0) { $UpdateDisplay.Invoke() }
+        }
+        $fs.Dispose()
+    } catch {}
+})
+$timer.Start()
 
-    $Global:DebugSync.PowerShellInstance = [PowerShell]::Create()
-    $Global:DebugSync.PowerShellInstance.Runspace = $sta
-    $null = $Global:DebugSync.PowerShellInstance.AddScript($UiScript).AddArgument($Global:DebugSync)
-    $null = $Global:DebugSync.PowerShellInstance.BeginInvoke()
+$btnFilter.Add_Click({     $script:ActiveFilter = $txtSearch.Text; $UpdateDisplay.Invoke() })
+$btnClearFilter.Add_Click({ $txtSearch.Text = ""; $script:ActiveFilter = ""; $UpdateDisplay.Invoke() })
+$btnClear.Add_Click({      $allLines.Clear(); $txtLogs.Clear(); $script:LastPos = 0L })
+$btnSave.Add_Click({
+    $sfd = New-Object Microsoft.Win32.SaveFileDialog
+    $sfd.Filter = "Log Files (*.log)|*.log|Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
+    $sfd.FileName = "toolkit_debug_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    if ($sfd.ShowDialog() -eq $true) {
+        try   { [System.IO.File]::WriteAllLines($sfd.FileName, $allLines.ToArray()) }
+        catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Save Error") }
+    }
+})
+$window.Add_Closed({ $timer.Stop() })
+$window.ShowDialog() | Out-Null
+'@
 
-    Write-Host "Debug window launched (STA/WPF background runspace)." -ForegroundColor Green
+    [System.IO.File]::WriteAllText($uiScript, $wpfCode, [System.Text.Encoding]::UTF8)
+
+    $proc = Start-Process pwsh -ArgumentList @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-Sta",
+        "-File", $uiScript, $logFile
+    ) -WindowStyle Hidden -PassThru
+
+    [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)", [System.Text.Encoding]::UTF8)
+
+    $Global:DebugSync.LogFile = $logFile
+    $Global:DebugSync.WpfProc = $proc
+    $Global:DebugSync.Running = $true
+
+    Write-Host "Debug console launched (PID $($proc.Id))." -ForegroundColor Green
 }
 
 function Write-DebugWindow {
-    <#
-    .SYNOPSIS
-        Sends a message string to the external tracking window.
-    #>
-    Param(
-        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]$Message,
-
-        [Parameter(Mandatory=$false)]
-        [ValidateSet("INFO", "WARN", "ERROR", "DEBUG")]
-        [string]$Level = "INFO"
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string]$Message,
+        [ValidateSet("INFO","WARN","ERROR","DEBUG")][string]$Level = "INFO"
     )
+    $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $line = "[$ts] [$($Level.PadRight(5))] $Message"
 
-    if (-not $Global:DebugSync.Running) {
-        # Fallback to standard console output if debug window isn't active
-        Write-Host "[Background Window Closed] [$Level] $Message" -ForegroundColor Gray
-        return
+    if ($Global:DebugSync.Running -and $Global:DebugSync.LogFile) {
+        [System.IO.File]::AppendAllText($Global:DebugSync.LogFile, "$line`r`n", [System.Text.Encoding]::UTF8)
+    } else {
+        Write-Host $line -ForegroundColor DarkGray
     }
-
-    # Format the message nicely with a timestamp
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-    $formattedMessage = "[$timestamp] [$($Level.PadRight(5))] $Message"
-
-    # Enqueue the data for the UI thread to harvest
-    $Global:DebugSync.Queue.Enqueue($formattedMessage)
 }
 
 function Stop-DebugWindow {
-    <#
-    .SYNOPSIS
-        Forcefully disposes and shuts down the background debugging instance.
-    #>
-    if ($Global:DebugSync.PowerShellInstance -ne $null) {
-        $rs = $Global:DebugSync.PowerShellInstance.Runspace
-        $Global:DebugSync.PowerShellInstance.Dispose()
-        if ($rs) { try { $rs.Dispose() } catch {} }
-        $Global:DebugSync.PowerShellInstance = $null
+    if ($Global:DebugSync.WpfProc -and -not $Global:DebugSync.WpfProc.HasExited) {
+        try { $Global:DebugSync.WpfProc.CloseMainWindow() | Out-Null } catch {}
     }
     $Global:DebugSync.Running = $false
-    Write-Host "Debug environment torn down." -ForegroundColor Yellow
+    Write-Host "Debug console stopped." -ForegroundColor Yellow
 }
 
-
 Export-ModuleMember -Function Start-DebugWindow, Write-DebugWindow, Stop-DebugWindow
-
