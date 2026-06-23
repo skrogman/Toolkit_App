@@ -100,7 +100,7 @@ try {
                     if ($File.name -eq 'Entry.ps1') {
                         if ($Desc) { $Synopsis = $Desc }
                     } else {
-                        $Scripts.Add(@{ Name = $File.name -replace '\.ps1$',''; Desc = $Desc })
+                        $Scripts.Add(@{ Name = ($File.name -replace '\.ps1$', ''); Desc = $Desc })
                     }
                 }
 
