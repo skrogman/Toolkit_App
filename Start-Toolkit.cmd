@@ -49,6 +49,13 @@ try {
 # Catch the environment flag if we just did a PS5 -> PS7 Engine Handoff
 if ($env:TK_FORCE_MENU -eq "1") { $ShiftPressed = $true }
 
+# Catch the flag file written by option 6 before elevation — survives UAC process boundary
+$_AdminMenuFlag = Join-Path $env:TEMP "toolkit_admin_menu.flag"
+if (Test-Path $_AdminMenuFlag) {
+    $ShiftPressed = $true
+    Remove-Item $_AdminMenuFlag -Force -ErrorAction SilentlyContinue
+}
+
 # --- [1] ENGINE HANDOFF: PS 5.1 CLS-COMPLIANCE BYPASS ---
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "`n[!] Legacy PowerShell 5.1 Engine Detected." -ForegroundColor DarkGray
@@ -261,16 +268,11 @@ function Show-ConfigMenu {
                         Start-Sleep -Milliseconds 600
                     }
                     $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
+                    # Write flag file so the elevated session re-enters the admin menu automatically
+                    [System.IO.File]::WriteAllText((Join-Path $env:TEMP "toolkit_admin_menu.flag"), "1")
                     Write-Host "`n[*] Relaunching as Administrator..." -ForegroundColor Magenta
-                    $launched = $false
-                    if (Get-Command wt -ErrorAction SilentlyContinue) {
-                        try {
-                            # WT 1.21+: --elevated opens an elevated tab in the current window
-                            Start-Process wt -ArgumentList "-w 0 new-tab --title `"Toolkit Admin`" --elevated cmd /c `"`"$CmdFile`"`"" -ErrorAction Stop
-                            $launched = $true
-                        } catch {}
-                    }
-                    if (-not $launched) { Start-Process -FilePath $CmdFile -Verb RunAs }
+                    # Use cmd.exe as the elevated host — reliable UAC, inherits the same console window
+                    Start-Process cmd.exe -Verb RunAs -ArgumentList "/c `"`"$CmdFile`"`""
                     Exit
                 }
             }
