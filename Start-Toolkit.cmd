@@ -189,9 +189,9 @@ function Show-ConfigMenu {
                     $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
                     $global:ToolkitDebugMode  = $true
 
-                    $DbgScript = Join-Path $ScriptRootPath 'DebugWindow.ps1'
-                    if (Test-Path $DbgScript) {
-                        . $DbgScript
+                    $DbgModule = Join-Path $ScriptRootPath 'DebugWindow.psm1'
+                    if (Test-Path $DbgModule) {
+                        Import-Module $DbgModule -Force -ErrorAction Stop
                         Start-DebugWindow
                         Start-Sleep -Milliseconds 800
 
@@ -209,7 +209,7 @@ function Show-ConfigMenu {
                         }
                         Write-DebugWindow "Launching TUI with local Entry.ps1..." -Level INFO
                     } else {
-                        Write-Host "[!] DebugWindow.ps1 not found — run: git pull" -ForegroundColor Red
+                        Write-Host "[!] DebugWindow.psm1 not found — run: git pull" -ForegroundColor Red
                         Read-Host "Press [Enter] to continue"
                     }
                     return   # exit Show-ConfigMenu; production handoff picks up below

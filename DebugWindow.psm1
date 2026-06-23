@@ -33,7 +33,7 @@ function Start-DebugWindow {
         <StatusBar Grid.Row="2" Background="#E4E4E7">
             <StatusBarItem HorizontalAlignment="Right">
                 <StackPanel Orientation="Horizontal">
-                    <Button Name="btnClear" Content="Clear" Width="80"  Margin="2" Padding="3"/>
+                    <Button Name="btnClear" Content="Clear"    Width="80"  Margin="2"   Padding="3"/>
                     <Button Name="btnSave"  Content="Save As..." Width="100" Margin="5,2" Padding="3" Background="#22C55E" Foreground="White" BorderThickness="0"/>
                 </StackPanel>
             </StatusBarItem>
@@ -73,9 +73,9 @@ function Start-DebugWindow {
         })
         $timer.Start()
 
-        $btnFilter.Add_Click({ $script:ActiveFilter = $txtSearch.Text; $UpdateDisplay.Invoke() })
+        $btnFilter.Add_Click({      $script:ActiveFilter = $txtSearch.Text; $UpdateDisplay.Invoke() })
         $btnClearFilter.Add_Click({ $txtSearch.Text = ""; $script:ActiveFilter = ""; $UpdateDisplay.Invoke() })
-        $btnClear.Add_Click({ $masterLog.Clear(); $txtLogs.Clear() })
+        $btnClear.Add_Click({       $masterLog.Clear(); $txtLogs.Clear() })
 
         $btnSave.Add_Click({
             $sfd = New-Object Microsoft.Win32.SaveFileDialog
@@ -84,7 +84,7 @@ function Start-DebugWindow {
             if ($sfd.ShowDialog() -eq $true) {
                 try {
                     [System.IO.File]::WriteAllLines($sfd.FileName, $masterLog.ToArray())
-                    [System.Windows.MessageBox]::Show("Saved to:`n$($sfd.FileName)", "Saved", "OK", "Information")
+                    [System.Windows.MessageBox]::Show("Saved:`n$($sfd.FileName)", "Saved", "OK", "Information")
                 } catch {
                     [System.Windows.MessageBox]::Show("Save failed:`n$($_.Exception.Message)", "Error", "OK", "Error")
                 }
@@ -110,7 +110,7 @@ function Write-DebugWindow {
         Write-Host "[$Level] $Message" -ForegroundColor Gray
         return
     }
-    $ts  = Get-Date -Format "HH:mm:ss.fff"
+    $ts = Get-Date -Format "HH:mm:ss.fff"
     $Global:DebugSync.Queue.Enqueue("[$ts] [$($Level.PadRight(5))] $Message")
 }
 
@@ -122,3 +122,5 @@ function Stop-DebugWindow {
     $Global:DebugSync.Running = $false
     Write-Host "Debug window torn down." -ForegroundColor Yellow
 }
+
+Export-ModuleMember -Function Start-DebugWindow, Write-DebugWindow, Stop-DebugWindow
