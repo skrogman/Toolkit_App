@@ -5,6 +5,7 @@ $Global:DebugSync = [hashtable]::Synchronized(@{
 })
 
 function Start-DebugWindow {
+    param([int]$X = -1, [int]$Y = -1)
     $logFile  = Join-Path $env:TEMP "toolkit_debug_active.log"
     $pidFile  = Join-Path $env:TEMP "toolkit_debug_active.pid"
     $uiScript = Join-Path $env:TEMP "toolkit_debug_ui.ps1"
@@ -26,7 +27,7 @@ function Start-DebugWindow {
     [System.IO.File]::WriteAllText($logFile, "", [System.Text.Encoding]::UTF8)
 
     $wpfCode = @'
-param([string]$LogFile)
+param([string]$LogFile, [int]$X = -1, [int]$Y = -1)
 Add-Type -AssemblyName PresentationFramework, WindowsBase
 
 [xml]$xaml = @"
@@ -116,6 +117,11 @@ $btnSave.Add_Click({
     }
 })
 $window.Add_Closed({ $timer.Stop() })
+if ($X -ge 0 -and $Y -ge 0) {
+    $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
+    $window.Left = $X
+    $window.Top  = $Y
+}
 $window.ShowDialog() | Out-Null
 '@
 
@@ -123,7 +129,7 @@ $window.ShowDialog() | Out-Null
 
     $proc = Start-Process pwsh -ArgumentList @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-Sta",
-        "-File", $uiScript, $logFile
+        "-File", $uiScript, $logFile, $X, $Y
     ) -WindowStyle Hidden -PassThru
 
     [System.IO.File]::WriteAllText($pidFile, "$($proc.Id)", [System.Text.Encoding]::UTF8)

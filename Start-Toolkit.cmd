@@ -157,7 +157,45 @@ function Get-DecodedToken($Config) {
 }
 
 
+function Get-ConsoleWindowRect {
+    try {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public class ConWin {
+    [DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]   public static extern bool GetWindowRect(System.IntPtr h, out RECT r);
+    public struct RECT { public int Left, Top, Right, Bottom; }
+}
+'@ -ErrorAction SilentlyContinue
+        $h = [ConWin]::GetConsoleWindow()
+        $r = New-Object ConWin+RECT
+        [ConWin]::GetWindowRect($h, [ref]$r) | Out-Null
+        return $r
+    } catch { return $null }
+}
+
 function Show-ConfigMenu {
+    # Auto-reconnect to a debug window that survived from a previous (pre-elevation) session
+    $pidFile = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    $logFile = Join-Path $env:TEMP "toolkit_debug_active.log"
+    if (-not ($Global:DebugSync -and $Global:DebugSync.Running) -and (Test-Path $pidFile) -and (Test-Path $logFile)) {
+        try {
+            $savedPid = [int](Get-Content $pidFile -Raw).Trim()
+            $proc = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($proc -and -not $proc.HasExited) {
+                $DbgTemp = Join-Path $env:TEMP "DebugWindow.psm1"
+                if (-not (Test-Path $DbgTemp)) {
+                    $cb = [guid]::NewGuid().ToString()
+                    Invoke-RestMethod "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$cb" -OutFile $DbgTemp -UseBasicParsing
+                }
+                Import-Module $DbgTemp -Force -ErrorAction Stop
+                Start-DebugWindow   # PID file check inside reconnects without spawning new window
+                $isElev = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                Write-DebugWindow "=== Session reconnected | Elevated: $isElev ===" -Level INFO
+            }
+        } catch {}
+    }
+
     while ($true) {
         Clear-Host
         Write-Host "=====================================================================" -ForegroundColor Yellow
@@ -186,7 +224,10 @@ function Show-ConfigMenu {
                     $cb = [guid]::NewGuid().ToString()
                     Invoke-RestMethod -Uri "https://raw.githubusercontent.com/skrogman/Toolkit_App/main/DebugWindow.psm1?t=$cb" -OutFile $DbgTemp -UseBasicParsing
                     Import-Module $DbgTemp -Force -ErrorAction Stop
-                    Start-DebugWindow
+                    $rect = Get-ConsoleWindowRect
+                    $dbgX = if ($rect) { $rect.Left } else { -1 }
+                    $dbgY = if ($rect) { [Math]::Max(0, $rect.Bottom + 5) } else { -1 }
+                    Start-DebugWindow -X $dbgX -Y $dbgY
                     Start-Sleep -Milliseconds 800
                     Write-DebugWindow "=== TOOLKIT DEBUG CONSOLE ===" -Level INFO
                     $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -216,12 +257,20 @@ function Show-ConfigMenu {
                     Start-Sleep -Seconds 2
                 } else {
                     if ($Global:DebugSync -and $Global:DebugSync.Running) {
-                        Write-DebugWindow "Relaunching as Administrator — this console will close." -Level WARN
+                        Write-DebugWindow "Relaunching as Administrator — debug console will stay open." -Level WARN
                         Start-Sleep -Milliseconds 600
                     }
                     $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
                     Write-Host "`n[*] Relaunching as Administrator..." -ForegroundColor Magenta
-                    Start-Process -FilePath $CmdFile -Verb RunAs
+                    $launched = $false
+                    if (Get-Command wt -ErrorAction SilentlyContinue) {
+                        try {
+                            # WT 1.21+: --elevated opens an elevated tab in the current window
+                            Start-Process wt -ArgumentList "-w 0 new-tab --title `"Toolkit Admin`" --elevated cmd /c `"`"$CmdFile`"`"" -ErrorAction Stop
+                            $launched = $true
+                        } catch {}
+                    }
+                    if (-not $launched) { Start-Process -FilePath $CmdFile -Verb RunAs }
                     Exit
                 }
             }
