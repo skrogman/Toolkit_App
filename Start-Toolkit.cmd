@@ -179,17 +179,19 @@ function Invoke-DiagnosticsEngine($AuthHeader, $Config) {
         Write-Host "[DEBUG] Error Message: $($_.Exception.Message)" -ForegroundColor Red
     }
 
-    Write-Host "`n[DEBUG] Pulling cloud master orchestrator payload anonymously..." -ForegroundColor Cyan
-    $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$Owner/Toolkit_App/$Branch/Entry.ps1"
-    
+    Write-Host "`n[DEBUG] Pulling cloud master orchestrator payload..." -ForegroundColor Cyan
+    $CacheBuster = [guid]::NewGuid().ToString()
+    $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$Owner/Toolkit_App/$Branch/Entry.ps1?t=$CacheBuster"
+
     try {
-        $MasterCode = Invoke-RestMethod -Uri $MasterOrchestratorUrl -UseBasicParsing
-        Write-Host "[DEBUG] Code payload successfully loaded into memory ($($MasterCode.Length) characters)." -ForegroundColor Green
-        Write-Host "`n[DEBUG] Executing Cloud Code Block under CASE-COMPLIANCE Intercept...`n" -ForegroundColor Yellow
-        
+        $FetchHeaders = if ($AuthHeader) { $AuthHeader } else { @{} }
+        $MasterCode = Invoke-RestMethod -Uri $MasterOrchestratorUrl -Headers $FetchHeaders -UseBasicParsing
+        Write-Host "[DEBUG] Code payload loaded ($($MasterCode.Length) characters)." -ForegroundColor Green
+        Write-Host "`n[DEBUG] Executing Cloud Code Block...`n" -ForegroundColor Yellow
+
         $ScriptBlock = [scriptblock]::Create($MasterCode)
         $ErrorActionPreference = "Continue"
-        . $ScriptBlock
+        . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $Owner -TargetRepo $Repo -Branch $Branch
     } catch {
         Write-Host "[!] Diagnostics caught an execution crash: $($_.Exception.Message)" -ForegroundColor Red
     }
@@ -306,13 +308,14 @@ try {
     $global:ToolkitBranch     = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
 
     # --- [5] STANDARD PRODUCTION HANDOFF ---
-    $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$($global:ToolkitRepoOwner)/Toolkit_App/$($global:ToolkitBranch)/Entry.ps1"
-    
+    $CacheBuster = [guid]::NewGuid().ToString()
+    $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$($global:ToolkitRepoOwner)/Toolkit_App/$($global:ToolkitBranch)/Entry.ps1?t=$CacheBuster"
+
     $MasterCode = Invoke-RestMethod -Uri $MasterOrchestratorUrl -UseBasicParsing
     $ScriptBlock = [scriptblock]::Create($MasterCode)
-    
+
     Clear-Host
-    . $ScriptBlock
+    . $ScriptBlock -AuthHeader $global:ToolkitAuthHeader -RepoOwner $global:ToolkitRepoOwner -TargetRepo $global:ToolkitTargetRepo -Branch $global:ToolkitBranch
 
 } catch {
     Write-Host "`n[!] Critical Failure during initialization: $($_.Exception.Message)" -ForegroundColor Red
