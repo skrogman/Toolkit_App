@@ -168,10 +168,11 @@ function Show-ConfigMenu {
         Write-Host "  3) List Currently Configured Users" -ForegroundColor Cyan
         Write-Host "  4) Exit Administration Panel and Start Production Handoff" -ForegroundColor Green
         Write-Host "  5) Abort & Exit Completely" -ForegroundColor Red
+        Write-Host "  6) Relaunch as Administrator" -ForegroundColor Magenta
         Write-Host "=====================================================================" -ForegroundColor Yellow
-        
-        $MenuChoice = Read-Host "Select an administration option [1-5]"
-        
+
+        $MenuChoice = Read-Host "Select an administration option [1-6]"
+
         switch ($MenuChoice.Trim()) {
             "1" {
                 if (-not (Test-Path $ConfigFile)) {
@@ -230,6 +231,18 @@ function Show-ConfigMenu {
             }
             "4" { return }
             "5" { Exit }
+            "6" {
+                $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                if ($IsAdmin) {
+                    Write-Host "`n[!] Already running as Administrator." -ForegroundColor Yellow
+                    Start-Sleep -Seconds 2
+                } else {
+                    $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
+                    Write-Host "`n[*] Relaunching as Administrator..." -ForegroundColor Magenta
+                    Start-Process -FilePath $CmdFile -Verb RunAs
+                    Exit
+                }
+            }
         }
     }
 }
