@@ -26,6 +26,8 @@ if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 $AllowedTags = if ($global:ToolkitAllowedTags -and $global:ToolkitAllowedTags.Count -gt 0) {
     @($global:ToolkitAllowedTags)
 } else { $null }
+# Wildcard "*" in any allowed tag means unrestricted — short-circuit to null
+if ($AllowedTags -and ($AllowedTags -contains "*")) { $AllowedTags = $null }
 if ($global:ToolkitGodMode) { $AllowedTags = $null }
 
 function Write-Log { param($Level,$Message)

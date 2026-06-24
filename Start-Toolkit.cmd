@@ -324,6 +324,168 @@ function Invoke-RoleManager {
 }
 
 
+function Invoke-ModuleConfigEditor {
+    # Use active session PAT, or authenticate inline
+    $Pat = $global:ToolkitPAT
+    if (-not $Pat) {
+        if (-not (Test-Path $ConfigFile)) {
+            Write-Host "[!] No config — enroll a user via Option 2 first." -ForegroundColor Red
+            Read-Host "Press [Enter] to return"; return
+        }
+        Write-Host "`n  No active session. Authenticate to reach the repo." -ForegroundColor Yellow
+        try {
+            $Cfg        = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+            $AuthResult = Get-DecodedToken -Config $Cfg
+            $Pat        = $AuthResult.PAT
+        } catch {
+            Write-Host "[!] $($_.Exception.Message)" -ForegroundColor Red
+            Read-Host "Press [Enter] to return"; return
+        }
+    }
+
+    $Owner   = if ($global:ToolkitRepoOwner)  { $global:ToolkitRepoOwner  } else { "skrogman" }
+    $Repo    = if ($global:ToolkitTargetRepo) { $global:ToolkitTargetRepo } else { "Toolkit_Modules" }
+    $Branch  = if ($global:ToolkitBranch)     { $global:ToolkitBranch     } else { "main" }
+    $AuthHdr = @{ Authorization = "Bearer $Pat" }
+    $ApiBase = "https://api.github.com/repos/$Owner/$Repo"
+
+    Clear-Host
+    Write-Host "=== EMBED MODULE CONFIG (.TOOLKIT_CONFIG) ===" -ForegroundColor Yellow
+    Write-Host "  Writes a .TOOLKIT_CONFIG JSON block into a module's Entry.ps1." -ForegroundColor DarkGray
+    Write-Host "  Repo: $Owner/$Repo @ $Branch`n" -ForegroundColor DarkGray
+
+    # Fetch module list
+    try {
+        $Items = Invoke-RestMethod -Uri "$ApiBase/contents?ref=$Branch" -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
+        $Dirs  = @($Items | Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } | Sort-Object name)
+    } catch {
+        Write-Host "[!] Could not fetch module list: $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "Press [Enter] to return"; return
+    }
+
+    if ($Dirs.Count -eq 0) {
+        Write-Host "[!] No module directories found in $Owner/$Repo." -ForegroundColor Red
+        Read-Host "Press [Enter] to return"; return
+    }
+
+    Write-Host "  Available modules:" -ForegroundColor Yellow
+    for ($i = 0; $i -lt $Dirs.Count; $i++) { Write-Host "  $($i+1)) $($Dirs[$i].name)" -ForegroundColor Gray }
+    Write-Host ""
+    $Sel    = (Read-Host "  Select module [1-$($Dirs.Count)] or Enter to cancel").Trim()
+    if ([string]::IsNullOrEmpty($Sel)) { return }
+    $SelIdx = try { [int]$Sel - 1 } catch { -1 }
+    if ($SelIdx -lt 0 -or $SelIdx -ge $Dirs.Count) {
+        Write-Host "  [!] Invalid selection." -ForegroundColor Red; Start-Sleep 1; return
+    }
+
+    $ModDir    = $Dirs[$SelIdx]
+    $EntryPath = "$($ModDir.name)/Entry.ps1"
+
+    # Fetch current Entry.ps1 content and SHA
+    Write-Host "`n  Fetching $EntryPath..." -ForegroundColor DarkGray
+    try {
+        $FileInfo       = Invoke-RestMethod -Uri "$ApiBase/contents/$EntryPath`?ref=$Branch" -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
+        $CurrentContent = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($FileInfo.content -replace '[\r\n\s]','')))
+        $FileSha        = $FileInfo.sha
+    } catch {
+        Write-Host "  [!] Could not fetch Entry.ps1: $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "Press [Enter] to return"; return
+    }
+
+    # Parse existing .TOOLKIT_CONFIG if present
+    $Ex = $null
+    if ($CurrentContent -match '(?ms)\.TOOLKIT_CONFIG\s*(\{.*?\})\s*(?=#>|\.[A-Z])') {
+        try { $Ex = $Matches[1] | ConvertFrom-Json } catch { }
+    }
+
+    Clear-Host
+    $verb = if ($Ex) { "UPDATING" } else { "ADDING" }
+    Write-Host "=== $verb CONFIG: $($ModDir.name) ===" -ForegroundColor Yellow
+    Write-Host "  Blank input keeps the value shown in [brackets].`n" -ForegroundColor DarkGray
+
+    # Helper: prompt with current value hint
+    $P = { param($Lbl,$Cur,$Default)
+        $hint = if ($Cur) { " [$Cur]" } elseif ($Default) { " (e.g. $Default)" } else { "" }
+        $v = (Read-Host "  $Lbl$hint").Trim()
+        if ([string]::IsNullOrEmpty($v)) { if ($Cur) { $Cur } else { $Default } } else { $v }
+    }
+
+    $DisplayName = & $P "Display Name"            ($Ex.displayName)       $ModDir.name
+    $Description = & $P "Description"             ($Ex.description)       "Describe what this module does."
+    $Version     = & $P "Version"                 ($Ex.version)           "1.0.0"
+    $Author      = & $P "Author"                  ($Ex.author)            ""
+
+    $TagDef  = if ($Ex.tags) { $Ex.tags -join ', ' } else { "basic-access" }
+    Write-Host "`n  Standard tags: basic-access  restricted-access  development-access  forensics  remediation" -ForegroundColor DarkGray
+    $TagInput = (Read-Host "  Tags (comma-sep) [$TagDef]").Trim()
+    $Tags     = if ($TagInput) { @($TagInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @($TagDef -split ',' | ForEach-Object { $_.Trim() }) }
+
+    $Category  = & $P "Category (Storage/Network/Forensics/Remediation/Security/Diagnostic)" ($Ex.category) "Diagnostic"
+    $Elevation = & $P "Required Elevation (none / local-admin / domain-admin)" ($Ex.requiredElevation) "local-admin"
+    $Danger    = & $P "Danger Level (safe / moderate / destructive)" ($Ex.dangerLevel) "safe"
+    $OutType   = & $P "Output Type (report / remediation / collection / diagnostic)" ($Ex.outputType) "diagnostic"
+    $Runtime   = & $P "Estimated Runtime"         ($Ex.estimatedRuntime)  "< 1 min"
+    $DisStr    = & $P "Disabled? (true/false)"    (if ($null -ne $Ex.disabled) { "$($Ex.disabled)".ToLower() } else { $null }) "false"
+    $Disabled  = ($DisStr -eq 'true')
+
+    # Build JSON config block
+    $CfgHash = [ordered]@{
+        displayName       = $DisplayName
+        description       = $Description
+        version           = $Version
+        author            = $Author
+        tags              = $Tags
+        category          = $Category
+        requiredElevation = $Elevation
+        dangerLevel       = $Danger
+        outputType        = $OutType
+        estimatedRuntime  = $Runtime
+        disabled          = $Disabled
+    }
+    $Json = $CfgHash | ConvertTo-Json -Depth 5
+
+    Write-Host "`n  .TOOLKIT_CONFIG to write:" -ForegroundColor Yellow
+    Write-Host $Json -ForegroundColor DarkGray
+    Write-Host ""
+    if ((Read-Host "  Commit to $Owner/$Repo? [y/N]").Trim().ToLower() -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow; Start-Sleep 1; return
+    }
+
+    # Strip any existing .TOOLKIT_CONFIG block from the file content
+    $Work = $CurrentContent -replace '(?ms)\.TOOLKIT_CONFIG[ \t]*\r?\n\{.*?\}[ \t]*(\r?\n)?', ''
+
+    # Inject the new block before the first #> (end of opening comment block)
+    $TkBlock  = "`r`n.TOOLKIT_CONFIG`r`n$Json`r`n"
+    $closeIdx = $Work.IndexOf('#>')
+    if ($closeIdx -ge 0) {
+        $NewContent = $Work.Substring(0, $closeIdx) + $TkBlock + $Work.Substring($closeIdx)
+    } else {
+        # No comment block exists — prepend one
+        $NewContent = "<#`r`n.SYNOPSIS`r`n    $DisplayName`r`n$TkBlock#>`r`n`r`n$Work"
+    }
+
+    # Base64-encode and commit via GitHub Contents API
+    $Encoded    = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($NewContent))
+    $CommitBody = [ordered]@{
+        message = "config: embed .TOOLKIT_CONFIG in $($ModDir.name)/Entry.ps1"
+        content = $Encoded
+        sha     = $FileSha
+        branch  = $Branch
+    } | ConvertTo-Json
+
+    try {
+        Invoke-RestMethod -Uri "$ApiBase/contents/$EntryPath" `
+            -Method Put -Headers $AuthHdr -ContentType 'application/json' `
+            -Body $CommitBody -UseBasicParsing -ErrorAction Stop | Out-Null
+        Write-Host "`n  [+] Committed! .TOOLKIT_CONFIG is live in $($ModDir.name)/Entry.ps1" -ForegroundColor Green
+        Write-Host "  The toolkit picks up tags and metadata on next launch." -ForegroundColor DarkGray
+    } catch {
+        Write-Host "`n  [!] Commit failed: $($_.Exception.Message)" -ForegroundColor Red
+    }
+
+    Read-Host "`n  Press [Enter] to return"
+}
+
 function Test-DebugWindowAlive {
     $pf = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.pid"
     if (-not (Test-Path $pf)) { return $false }
@@ -399,9 +561,10 @@ function Show-ConfigMenu {
         Write-Host "  6) Relaunch as Administrator$_admTag" -ForegroundColor Magenta
         Write-Host "  7) Authenticate & Launch Toolkit" -ForegroundColor Green
         Write-Host "  8) Manage Roles" -ForegroundColor Cyan
+        Write-Host "  9) Embed Module Config (.TOOLKIT_CONFIG tags/metadata)" -ForegroundColor Cyan
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
-        $MenuChoice = Read-Host "Select an administration option [1-8]"
+        $MenuChoice = Read-Host "Select an administration option [1-9]"
 
         switch ($MenuChoice.Trim()) {
             "1" {
@@ -532,6 +695,7 @@ function Show-ConfigMenu {
                 }
             }
             "8" { Invoke-RoleManager }
+            "9" { Invoke-ModuleConfigEditor }
         }
     }
 }
