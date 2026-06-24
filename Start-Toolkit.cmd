@@ -505,10 +505,18 @@ function Invoke-ModuleConfigEditor {
     $Tags     = if ($TagInput) { @($TagInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @($TagDef -split ',' | ForEach-Object { $_.Trim() }) }
 
     $Category  = & $P "Category (Storage/Network/Forensics/Remediation/Security/Diagnostic)" ($Ex.category) "Diagnostic"
-    $Elevation = & $P "Required Elevation (none / local-admin / domain-admin)" ($Ex.requiredElevation) "local-admin"
+    $Elevation = & $P "Required Elevation (none / local-admin / domain-admin)" ($Ex.requiredElevation) "none"
     $Danger    = & $P "Danger Level (safe / moderate / destructive)" ($Ex.dangerLevel) "safe"
     $OutType   = & $P "Output Type (report / remediation / collection / diagnostic)" ($Ex.outputType) "diagnostic"
     $Runtime   = & $P "Estimated Runtime"         ($Ex.estimatedRuntime)  "< 1 min"
+
+    $ModesDef  = if ($Ex.modes) { $Ex.modes -join ', ' } else { "interactive" }
+    Write-Host "`n  Supported run modes (comma-sep): interactive  silent" -ForegroundColor DarkGray
+    $ModesInput = (Read-Host "  Modes [$ModesDef]").Trim()
+    $Modes      = if ($ModesInput) { @($ModesInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @($ModesDef -split ',' | ForEach-Object { $_.Trim() }) }
+    $DefModeDef = if ($Ex.defaultMode) { $Ex.defaultMode } elseif ($Modes.Count -gt 0) { $Modes[0] } else { "interactive" }
+    $DefMode    = & $P "Default Mode" $DefModeDef $Modes[0]
+
     $DisStr    = & $P "Disabled? (true/false)"    (if ($null -ne $Ex.disabled) { "$($Ex.disabled)".ToLower() } else { $null }) "false"
     $Disabled  = ($DisStr -eq 'true')
 
@@ -524,6 +532,8 @@ function Invoke-ModuleConfigEditor {
         dangerLevel       = $Danger
         outputType        = $OutType
         estimatedRuntime  = $Runtime
+        modes             = $Modes
+        defaultMode       = $DefMode
         disabled          = $Disabled
     }
     $Json = $CfgHash | ConvertTo-Json -Depth 5

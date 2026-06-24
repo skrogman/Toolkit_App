@@ -23,6 +23,8 @@ if ($global:ToolkitRepoOwner)  { $RepoOwner  = $global:ToolkitRepoOwner  }
 if ($global:ToolkitTargetRepo) { $TargetRepo = $global:ToolkitTargetRepo }
 if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 
+$IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 $AllowedTags = if ($global:ToolkitAllowedTags -and $global:ToolkitAllowedTags.Count -gt 0) {
     @($global:ToolkitAllowedTags)
 } else { $null }
@@ -161,6 +163,11 @@ try {
             $EstRuntime     = if ($ModCfg) { $ModCfg.estimatedRuntime }  else { $null }
             $OutputType     = if ($ModCfg) { $ModCfg.outputType }        else { $null }
             $ModAuthor      = if ($ModCfg) { $ModCfg.author }            else { $null }
+            $ModModes       = if ($ModCfg -and $ModCfg.modes)       { @($ModCfg.modes) }       else { @("interactive") }
+            $ModDefaultMode = if ($ModCfg -and $ModCfg.defaultMode) { $ModCfg.defaultMode }    else { "interactive" }
+
+            # Elevation lock: module requires elevation that the current session doesn't have
+            $ElevLocked = $RequiredElev -and ($RequiredElev -ne 'none') -and (-not $IsElevated)
 
             $global:Modules.Add(@{
                 Name            = $Dir.name
@@ -170,12 +177,15 @@ try {
                 Tags            = $ModuleTags
                 Disabled        = $ModuleDisabled
                 RequiredElev    = $RequiredElev
+                ElevLocked      = $ElevLocked
                 DangerLevel     = $DangerLevel
                 Category        = $ModCategory
                 Version         = $ModVersion
                 EstRuntime      = $EstRuntime
                 OutputType      = $OutputType
                 Author          = $ModAuthor
+                Modes           = $ModModes
+                DefaultMode     = $ModDefaultMode
             })
         }
     } catch {
@@ -224,7 +234,10 @@ try {
 
     # Build the flat label list for Terminal.Gui's ListView
     $global:MenuLabels = [System.Collections.ArrayList]@()
-    foreach ($m in $global:Modules) { [void]$global:MenuLabels.Add("  $($m.DisplayName)") }
+    foreach ($m in $global:Modules) {
+        $prefix = if ($m.ElevLocked) { "  [ADMIN] " } else { "  " }
+        [void]$global:MenuLabels.Add("$prefix$($m.DisplayName)")
+    }
     [void]$global:MenuLabels.Add("  ─── Exit Toolkit ───")
 
     # ----------------------------------------------------------------
@@ -339,8 +352,15 @@ try {
                 if ($line.Trim()) { $wrapped += $line.TrimEnd() }
                 $t += ($wrapped -join "`n") + "`n"
 
+                # Elevation lock warning
+                if ($m.ElevLocked) {
+                    $t += "`n  ⚠ REQUIRES ADMINISTRATOR`n"
+                    $t += "  This module cannot run in the`n"
+                    $t += "  current session.`n"
+                }
+
                 # Module metadata badges (only non-empty fields)
-                $hasMeta = $m.Category -or $m.RequiredElev -or $m.DangerLevel -or $m.EstRuntime -or $m.OutputType -or $m.Version
+                $hasMeta = $m.Category -or $m.RequiredElev -or $m.DangerLevel -or $m.EstRuntime -or $m.OutputType -or $m.Version -or $m.Modes
                 if ($hasMeta) {
                     $t += "`n  ── MODULE DETAILS ─────────────`n"
                     if ($m.Category)     { $t += "  Category  : $($m.Category)`n" }
@@ -348,6 +368,7 @@ try {
                     if ($m.DangerLevel)  { $t += "  Risk      : $($m.DangerLevel)`n" }
                     if ($m.EstRuntime)   { $t += "  Runtime   : $($m.EstRuntime)`n" }
                     if ($m.OutputType)   { $t += "  Output    : $($m.OutputType)`n" }
+                    if ($m.Modes)        { $t += "  Modes     : $($m.Modes -join ' / ')`n" }
                     if ($m.Version) {
                         $verLine = "  Version   : $($m.Version)"
                         if ($m.Author) { $verLine += "   by $($m.Author)" }
@@ -377,7 +398,15 @@ try {
                 $t += "  Vault  : $RepoOwner/$TargetRepo`n"
                 $t += "  Branch : $Branch`n"
                 $t += "  Path   : /$($m.Name)/Entry.ps1`n`n"
-                $t += "  Press [Enter] to launch."
+                if ($m.ElevLocked) {
+                    $t += "  [ADMIN] Cannot launch — administrator`n"
+                    $t += "  privileges required."
+                } elseif ($m.Modes.Count -gt 1) {
+                    $t += "  Press [Enter] — you will be prompted`n"
+                    $t += "  to choose Interactive or Silent mode."
+                } else {
+                    $t += "  Press [Enter] to launch ($($m.DefaultMode) mode)."
+                }
             }
 
             $global:InfoView.Text = $t
@@ -406,10 +435,19 @@ try {
             param($e)
             if ($e.Item -ge $global:Modules.Count) {
                 $global:ExitMaster = $true
+                [Terminal.Gui.Application]::RequestStop()
             } else {
-                $global:TargetModule = $global:Modules[$e.Item].Name
+                $mod = $global:Modules[$e.Item]
+                if ($mod.ElevLocked) {
+                    # Block — no elevation path for operators
+                    & $global:BuildInfoPane -Index $e.Item
+                    return
+                }
+                $global:TargetModule     = $mod.Name
+                $global:TargetModeModes  = $mod.Modes
+                $global:TargetModeDefault = $mod.DefaultMode
+                [Terminal.Gui.Application]::RequestStop()
             }
-            [Terminal.Gui.Application]::RequestStop()
         }
         [void]$ListView.add_OpenSelectedItem($OnItemOpened)
 
@@ -429,7 +467,19 @@ try {
         # ----------------------------------------------------------------
         if ($global:TargetModule) {
             Clear-Host
-            Write-Log "INFO" "Fetching module: $global:TargetModule"
+
+            # Resolve execution mode
+            $ExecMode = $global:TargetModeDefault
+            if ($global:TargetModeModes -and $global:TargetModeModes.Count -gt 1) {
+                $modePrompt = ($global:TargetModeModes | ForEach-Object { "[$($_.Substring(0,1).ToUpper())]$($_.Substring(1))" }) -join " / "
+                $def = $global:TargetModeDefault.Substring(0,1).ToUpper()
+                $choice = (Read-Host "`n  Run mode: $modePrompt  [$def]").Trim().ToLower()
+                if ($choice -eq 's' -or $choice -eq 'silent')      { $ExecMode = 'silent' }
+                elseif ($choice -eq 'i' -or $choice -eq 'interactive') { $ExecMode = 'interactive' }
+                # blank → keep default
+            }
+
+            Write-Log "INFO" "Fetching module: $global:TargetModule (mode: $ExecMode)"
 
             $CacheBuster    = [guid]::NewGuid().ToString()
             $FetchUrl       = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
@@ -444,7 +494,7 @@ try {
                 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
                 Start-Transcript -Path $transcriptFile -Force | Out-Null
                 try {
-                    . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule
+                    . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule -ExecutionMode $ExecMode
                 } finally {
                     try { Stop-Transcript | Out-Null } catch {}
                 }
