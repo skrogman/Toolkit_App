@@ -72,7 +72,7 @@ function Read-ToolkitConfig {
     foreach ($line in $lines) {
         if ($line -eq '# ===TOOLKIT_CONFIG_BEGIN===') { $inBlock = $true; continue }
         if ($line -eq '# ===TOOLKIT_CONFIG_END===')   { break }
-        if ($inBlock) { $jsonLines.Add($line -replace '^# ?','') }
+        if ($inBlock) { $jsonLines.Add(($line -replace '^# ?','')) }
     }
     $json = ($jsonLines -join "`n").Trim()
     if ($json -and $json -ne '{}') { try { return $json | ConvertFrom-Json } catch { } }
