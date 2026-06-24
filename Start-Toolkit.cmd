@@ -3,6 +3,7 @@
 setlocal
 title Toolkit
 cd /d "%~dp0"
+set TK_SELF=%~f0
 where pwsh >nul 2>nul
 if %errorlevel% equ 0 (
     pwsh -NoProfile -ExecutionPolicy Bypass -Command "$f=[System.IO.File]::ReadAllText('%~f0'); Invoke-Expression $f"
@@ -27,8 +28,39 @@ $ErrorActionPreference = "Stop"
 
 # Establish execution path fallback environments
 $ScriptRootPath = if ([string]::IsNullOrEmpty($PSScriptRoot)) { $PWD.Path } else { $PSScriptRoot }
-$ConfigFile = Join-Path $ScriptRootPath "start-toolkit.cfg"
+$global:ToolkitSelfPath = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
+                          elseif ($MyInvocation.MyCommand.Path -and (Test-Path $MyInvocation.MyCommand.Path)) { $MyInvocation.MyCommand.Path }
+                          else { $null }
 $global:ToolkitDebugMode = $false
+
+function Read-EmbeddedConfig {
+    if (-not $global:ToolkitSelfPath) { return $null }
+    $lines     = [System.IO.File]::ReadAllLines($global:ToolkitSelfPath, [System.Text.Encoding]::UTF8)
+    $inBlock   = $false
+    $jsonLines = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $lines) {
+        if ($line -eq '# ===TOOLKIT_CONFIG_BEGIN===') { $inBlock = $true; continue }
+        if ($line -eq '# ===TOOLKIT_CONFIG_END===')   { break }
+        if ($inBlock) { $jsonLines.Add($line -replace '^# ?','') }
+    }
+    $json = ($jsonLines -join "`n").Trim()
+    if ($json -and $json -ne '{}') { try { return $json | ConvertFrom-Json } catch { } }
+    return $null
+}
+
+function Write-EmbeddedConfig($Config) {
+    if (-not $global:ToolkitSelfPath) { return }
+    $json    = $Config | ConvertTo-Json -Depth 10
+    $pfxd    = ($json -split '\r?\n' | ForEach-Object { "# $_" }) -join "`r`n"
+    $block   = "# ===TOOLKIT_CONFIG_BEGIN===`r`n$pfxd`r`n# ===TOOLKIT_CONFIG_END==="
+    $content = [System.IO.File]::ReadAllText($global:ToolkitSelfPath, [System.Text.Encoding]::UTF8)
+    if ($content -match '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===') {
+        $content = $content -replace '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===', $block
+    } else {
+        $content = $content.TrimEnd() + "`r`n`r`n$block`r`n"
+    }
+    [System.IO.File]::WriteAllText($global:ToolkitSelfPath, $content, [System.Text.Encoding]::UTF8)
+}
 
 # --- [0] HARDWARE KEY REGISTER & STATE INHERITANCE ---
 try {
@@ -135,9 +167,8 @@ function New-UserTokenConfig {
             DefaultRole  = "basic"
         }
     }
-    if (Test-Path $ConfigFile) {
-        $CurrentConfig = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-    }
+    $existing = Read-EmbeddedConfig
+    if ($existing) { $CurrentConfig = $existing }
 
     $existingRoles = if ($CurrentConfig.Roles) {
         ($CurrentConfig.Roles.PSObject.Properties.Name) -join ", "
@@ -156,7 +187,7 @@ function New-UserTokenConfig {
     } else {
         $CurrentConfig.Users | Add-Member -NotePropertyName $Username -NotePropertyValue $userEntry -Force
     }
-    $CurrentConfig | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+    Write-EmbeddedConfig $CurrentConfig
 
     Write-Host "`n[+] SUCCESS: Profile '$Username' enrolled with AES-256 encryption." -ForegroundColor Green
     Start-Sleep -Seconds 2
@@ -215,7 +246,7 @@ function Invoke-RoleManager {
         Clear-Host
         Write-Host "=== ROLE MANAGER ===" -ForegroundColor Yellow
 
-        $Cfg = if (Test-Path $ConfigFile) { Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json } else { $null }
+        $Cfg = Read-EmbeddedConfig
         $DefaultRole = if ($Cfg -and $Cfg.Settings -and $Cfg.Settings.DefaultRole) { $Cfg.Settings.DefaultRole } else { "(not set)" }
         Write-Host "  Default Role: $DefaultRole`n" -ForegroundColor DarkGray
 
@@ -243,7 +274,7 @@ function Invoke-RoleManager {
             "a" {
                 $RoleName = (Read-Host "  Role name (e.g. admin, analyst, basic)").Trim()
                 if ([string]::IsNullOrEmpty($RoleName)) { break }
-                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $CfgW = Read-EmbeddedConfig
                 if ($CfgW.Roles -and $CfgW.Roles.PSObject.Properties[$RoleName]) {
                     Write-Host "  Current tags: $($CfgW.Roles.$RoleName.tags -join ', ')" -ForegroundColor DarkGray
                 }
@@ -257,14 +288,14 @@ function Invoke-RoleManager {
                 } else {
                     $CfgW.Roles | Add-Member -NotePropertyName $RoleName -NotePropertyValue $roleObj -Force
                 }
-                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-EmbeddedConfig $CfgW
                 Write-Host "  [+] Role '$RoleName' saved with tags: $($Tags -join ', ')" -ForegroundColor Green
                 Start-Sleep 1
             }
             "b" {
                 $RoleName = (Read-Host "  Role to delete").Trim()
                 if ([string]::IsNullOrEmpty($RoleName)) { break }
-                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $CfgW = Read-EmbeddedConfig
                 if (-not ($CfgW.Roles -and $CfgW.Roles.PSObject.Properties[$RoleName])) {
                     Write-Host "  [!] Role '$RoleName' not found." -ForegroundColor Red; Start-Sleep 1; break
                 }
@@ -278,14 +309,14 @@ function Invoke-RoleManager {
                     $newRoles | Add-Member -NotePropertyName $_.Name -NotePropertyValue $_.Value -Force
                 }
                 $CfgW.Roles = $newRoles
-                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-EmbeddedConfig $CfgW
                 Write-Host "  [+] Role '$RoleName' deleted." -ForegroundColor Green
                 Start-Sleep 1
             }
             "c" {
                 if (-not ($Cfg -and $Cfg.Roles)) { Write-Host "  [!] No roles defined yet." -ForegroundColor Red; Start-Sleep 1; break }
                 $RoleName = (Read-Host "  Set default role").Trim()
-                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $CfgW = Read-EmbeddedConfig
                 if (-not $CfgW.Roles.PSObject.Properties[$RoleName]) {
                     Write-Host "  [!] Role '$RoleName' does not exist." -ForegroundColor Red; Start-Sleep 1; break
                 }
@@ -294,14 +325,14 @@ function Invoke-RoleManager {
                 } else {
                     $CfgW.Settings | Add-Member -NotePropertyName DefaultRole -NotePropertyValue $RoleName -Force
                 }
-                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-EmbeddedConfig $CfgW
                 Write-Host "  [+] DefaultRole set to '$RoleName'." -ForegroundColor Green
                 Start-Sleep 1
             }
             "d" {
                 $TargetUser = (Read-Host "  Username to toggle God Mode").Trim()
                 if ([string]::IsNullOrEmpty($TargetUser)) { break }
-                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $CfgW = Read-EmbeddedConfig
                 if (-not $CfgW.Users.PSObject.Properties[$TargetUser]) {
                     Write-Host "  [!] User '$TargetUser' not found." -ForegroundColor Red; Start-Sleep 1; break
                 }
@@ -312,7 +343,7 @@ function Invoke-RoleManager {
                 } else {
                     $CfgW.Users.$TargetUser | Add-Member -NotePropertyName godMode -NotePropertyValue $newGM -Force
                 }
-                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-EmbeddedConfig $CfgW
                 $status = if ($newGM) { "ENABLED" } else { "DISABLED" }
                 $color  = if ($newGM) { "Yellow"  } else { "Green"    }
                 Write-Host "  [+] God Mode $status for '$TargetUser'." -ForegroundColor $color
@@ -325,11 +356,11 @@ function Invoke-RoleManager {
 
 
 function Invoke-PATDiagnostic {
-    if (-not (Test-Path $ConfigFile)) {
-        Write-Host "[!] No config file found at $ConfigFile" -ForegroundColor Red
+    $Cfg = Read-EmbeddedConfig
+    if (-not $Cfg) {
+        Write-Host "[!] No config found — enroll a user via Option 2 first." -ForegroundColor Red
         Read-Host "Press [Enter] to return"; return
     }
-    $Cfg = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
 
     Clear-Host
     Write-Host "=== PAT DIAGNOSTIC ===" -ForegroundColor Yellow
@@ -397,13 +428,13 @@ function Invoke-ModuleConfigEditor {
     # Use active session PAT, or authenticate inline
     $Pat = $global:ToolkitPAT
     if (-not $Pat) {
-        if (-not (Test-Path $ConfigFile)) {
+        $Cfg = Read-EmbeddedConfig
+        if (-not $Cfg) {
             Write-Host "[!] No config — enroll a user via Option 2 first." -ForegroundColor Red
             Read-Host "Press [Enter] to return"; return
         }
         Write-Host "`n  No active session. Authenticate to reach the repo." -ForegroundColor Yellow
         try {
-            $Cfg        = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
             $AuthResult = Get-DecodedToken -Config $Cfg
             $Pat        = $AuthResult.PAT
         } catch {
@@ -689,8 +720,8 @@ function Show-ConfigMenu {
             }
             "2" { New-UserTokenConfig }
             "3" {
-                if (Test-Path $ConfigFile) {
-                    $Data = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                $Data = Read-EmbeddedConfig
+                if ($Data) {
                     Write-Host "`nConfigured Profiles:" -ForegroundColor Yellow
                     $Data.Users.PSObject.Properties | ForEach-Object {
                         $gmTag   = if ($_.Value.godMode) { " ★ GOD MODE" } else { "" }
@@ -704,7 +735,7 @@ function Show-ConfigMenu {
                         $color = if ($_.Value.godMode) { "Yellow" } else { "Gray" }
                         Write-Host " -> $($_.Name)$roleTag" -ForegroundColor $color
                     }
-                } else { Write-Host "[!] No configuration file detected yet." -ForegroundColor Red }
+                } else { Write-Host "[!] No configuration found — enroll via Option 2." -ForegroundColor Red }
                 Read-Host "`nPress [Enter] to return to menu"
             }
             "4" { return }
@@ -743,12 +774,12 @@ function Show-ConfigMenu {
                 }
             }
             "7" {
-                if (-not (Test-Path $ConfigFile)) {
+                $Cfg = Read-EmbeddedConfig
+                if (-not $Cfg) {
                     Write-Host "[!] Create a user via option 2 first." -ForegroundColor Red
                     Start-Sleep -Seconds 2; continue
                 }
                 try {
-                    $Cfg        = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
                     $AuthResult = Get-DecodedToken -Config $Cfg
                     $Token      = $AuthResult.PAT
                     $UserRole   = if ($AuthResult.Role) { $AuthResult.Role } else { $Cfg.Settings.DefaultRole }
@@ -834,13 +865,13 @@ try {
     Write-Host "[+] System Mutex verified. Ingesting assets..." -ForegroundColor DarkGray
 
     # --- [3] STANDARD PRODUCTION INGESTION WORKFLOW ---
-    if (-not (Test-Path $ConfigFile)) {
-        throw "Configuration file missing at: $ConfigFile. Hold down the SHIFT key on boot to open the setup menu."
+    $Config = Read-EmbeddedConfig
+    if (-not $Config) {
+        throw "No configuration found in this file. Hold down SHIFT on boot to open the setup menu and enroll a user."
     }
 
     # --- [4] AUTH — skip if debug mode already set globals via option 7 ---
     if (-not $global:ToolkitAuthHeader) {
-        $Config     = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
         $AuthResult = Get-DecodedToken -Config $Config
         $YourToken  = $AuthResult.PAT
         $UserRole   = if ($AuthResult.Role) { $AuthResult.Role } else { $Config.Settings.DefaultRole }
@@ -885,3 +916,28 @@ try {
         $Mutex.Dispose()
     }
 }
+
+# ===TOOLKIT_CONFIG_BEGIN===
+# {
+#   "Users": {},
+#   "Roles": {
+#     "admin": {
+#       "tags": [
+#         "*"
+#       ]
+#     },
+#     "basic": {
+#       "tags": [
+#         "basic-access"
+#       ]
+#     }
+#   },
+#   "Settings": {
+#     "PublicOwner": "skrogman",
+#     "PublicRepo": "Toolkit_Modules",
+#     "PublicBranch": "main",
+#     "VerboseMode": "true",
+#     "DefaultRole": "basic"
+#   }
+# }
+# ===TOOLKIT_CONFIG_END===
