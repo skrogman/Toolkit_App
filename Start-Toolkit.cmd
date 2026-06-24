@@ -62,54 +62,22 @@ function Write-EmbeddedConfig($Config) {
     [System.IO.File]::WriteAllText($global:ToolkitSelfPath, $content, [System.Text.Encoding]::UTF8)
 }
 
-# --- [0] HARDWARE KEY REGISTER & STATE INHERITANCE ---
-try {
-    $SourceCode = @'
-    using System;
-    using System.Runtime.InteropServices;
-    public class Win32Keyboard {
-        [DllImport("user32.dll")]
-        public static extern short GetKeyState(int nVirtKey);
-    }
-'@
-    Add-Type -TypeDefinition $SourceCode -ErrorAction SilentlyContinue
-    $ShiftPressed = (([Win32Keyboard]::GetKeyState(0x10) -band 0x8000) -eq 0x8000)
-} catch {
-    $ShiftPressed = [System.Windows.Forms.Control]::ModifierKeys.HasFlag([System.Windows.Forms.Keys]::Shift)
-}
-
-# Catch the environment flag if we just did a PS5 -> PS7 Engine Handoff
-if ($env:TK_FORCE_MENU -eq "1") { $ShiftPressed = $true }
-
-# Catch the flag file written by option 6 before elevation — shared dir survives cross-user UAC boundary
+# Ensure shared dir exists (used by Option 6 elevation flag)
 $_ToolkitShared = Join-Path $env:ProgramData "CassenaCareToolkit"
 if (-not (Test-Path $_ToolkitShared)) { $null = New-Item -Path $_ToolkitShared -ItemType Directory -Force -ErrorAction SilentlyContinue }
-$_AdminMenuFlag = Join-Path $_ToolkitShared "toolkit_admin_menu.flag"
-if (Test-Path $_AdminMenuFlag) {
-    $ShiftPressed = $true
-    Remove-Item $_AdminMenuFlag -Force -ErrorAction SilentlyContinue
-}
 
-# --- [1] ENGINE HANDOFF: PS 5.1 CLS-COMPLIANCE BYPASS ---
+# --- ENGINE HANDOFF: PS 5.1 -> PS7 ---
 if ($PSVersionTable.PSVersion.Major -lt 7) {
-    Write-Host "`n[!] Legacy PowerShell 5.1 Engine Detected." -ForegroundColor DarkGray
-    Write-Host "[+] Terminal.Gui TUI requires PowerShell 7+ (pwsh) to bypass CLS compliance crashes." -ForegroundColor Cyan
-    Write-Host "[+] Handing off execution to pwsh.exe natively..." -ForegroundColor Green
-    Start-Sleep -Milliseconds 600
-
-    # Carry the Shift key menu state over the process boundary
-    if ($ShiftPressed) { [System.Environment]::SetEnvironmentVariable("TK_FORCE_MENU", "1", "Process") }
-    
-    $TargetScript = if ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } else { Join-Path $ScriptRootPath "Start-Toolkit.ps1" }
-    
+    Write-Host "`n[!] PowerShell 7 required. Handing off to pwsh..." -ForegroundColor Cyan
+    $TargetScript = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
+                    elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
+                    else { $null }
     if (Get-Command pwsh -ErrorAction SilentlyContinue) {
         $Proc = Start-Process pwsh.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$TargetScript`"" -PassThru -Wait -NoNewWindow
         Exit $Proc.ExitCode
     } else {
-        Write-Host "`n[!] FATAL: pwsh.exe (PowerShell 7) is not installed or not in your system PATH!" -ForegroundColor Red
-        Write-Host "Please install PowerShell 7 to run Terminal.Gui orchestrator modules." -ForegroundColor Red
-        Read-Host "Press [Enter] to abort"
-        Exit
+        Write-Host "[!] FATAL: PowerShell 7 (pwsh) is not installed." -ForegroundColor Red
+        Read-Host "Press [Enter] to abort"; Exit
     }
 }
 
@@ -827,95 +795,8 @@ function Show-ConfigMenu {
     }
 }
 
-# --- [2] SINGLE-INSTANCE LOCK SYSTEM ---
-$MutexName  = "Global\SkrogmanIRToolkitEnclaveLock"
-$CreatedNew = $false
-$Mutex      = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
-
-if (-not $CreatedNew) {
-    Write-Host "`n[!] WARNING: Another instance of Toolkit Enclave is already running!" -ForegroundColor Yellow
-    $Choice = Read-Host "Allow multi-instance? [Y]es / [N or Enter] to kill old sessions & launch"
-    
-    if ($Choice.Trim().ToUpper() -eq 'Y') {
-        Write-Host "[+] Running in Multi-Instance mode. Bypassing lock..." -ForegroundColor Cyan
-        if ($Mutex) { $Mutex.Dispose(); $Mutex = $null }
-    } else {
-        Write-Host "[+] Initiating process wipe to take over instance lock..." -ForegroundColor Cyan
-        $CurrentPID = $PID
-        $ProcList = Get-CimInstance -ClassName Win32_Process -Filter "Name like 'powershell%.exe' or Name like 'pwsh%.exe' or Name like 'cmd.exe'"
-        $OtherInstances = $ProcList | Where-Object {
-            $_.ProcessId -ne $CurrentPID -and ($_.CommandLine -match "Start-Toolkit" -or $_.CommandLine -match "start-toolkit")
-        }
-        foreach ($P in $OtherInstances) {
-            Stop-Process -Id $P.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Milliseconds 600
-        if ($Mutex) { $Mutex.Dispose() }
-        $Mutex = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
-    }
-}
-
-# Route to admin menu if Shift was held — mutex is already held so only one instance can enter
-if ($ShiftPressed) {
-    Show-ConfigMenu
-    Clear-Host
-}
-
-try {
-    Write-Host "[+] System Mutex verified. Ingesting assets..." -ForegroundColor DarkGray
-
-    # --- [3] STANDARD PRODUCTION INGESTION WORKFLOW ---
-    $Config = Read-EmbeddedConfig
-    if (-not $Config) {
-        throw "No configuration found in this file. Hold down SHIFT on boot to open the setup menu and enroll a user."
-    }
-
-    # --- [4] AUTH — skip if debug mode already set globals via option 7 ---
-    if (-not $global:ToolkitAuthHeader) {
-        $AuthResult = Get-DecodedToken -Config $Config
-        $YourToken  = $AuthResult.PAT
-        $UserRole   = if ($AuthResult.Role) { $AuthResult.Role } else { $Config.Settings.DefaultRole }
-        $RoleDef    = if ($Config.Roles -and $Config.Roles.$UserRole) { $Config.Roles.$UserRole } else { $null }
-
-        $global:ToolkitAuthHeader  = @{ "Authorization" = "Bearer $YourToken" }
-        $env:GITHUB_TOKEN          = $YourToken
-        $global:GITHUB_TOKEN       = $YourToken
-        $global:ToolkitPAT         = $YourToken
-        $global:ToolkitRepoOwner   = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
-        $global:ToolkitTargetRepo  = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
-        $global:ToolkitBranch      = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
-        $global:ToolkitAllowedTags = if ($AuthResult.GodMode) { $null } elseif ($RoleDef) { @($RoleDef.tags) } else { @() }
-        $global:ToolkitGodMode     = $AuthResult.GodMode
-        $global:ToolkitUsername    = $script:LastAuthedUsername
-        $global:ToolkitRole        = $UserRole
-    }
-
-    # --- [5] LOAD ENTRY.PS1 — local file in debug mode, CDN otherwise ---
-    $LocalEntry = Join-Path $ScriptRootPath 'Entry.ps1'
-    if ($global:ToolkitDebugMode -and (Test-Path $LocalEntry)) {
-        if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
-            Write-DebugWindow "Loading local Entry.ps1 (debug mode — no CDN)" -Level DEBUG
-        }
-        $MasterCode = Get-Content -Path $LocalEntry -Raw
-    } else {
-        $CacheBuster           = [guid]::NewGuid().ToString()
-        $MasterOrchestratorUrl = "https://raw.githubusercontent.com/$($global:ToolkitRepoOwner)/Toolkit_App/$($global:ToolkitBranch)/Entry.ps1?t=$CacheBuster"
-        $MasterCode            = Invoke-RestMethod -Uri $MasterOrchestratorUrl -UseBasicParsing
-    }
-
-    $ScriptBlock = [scriptblock]::Create($MasterCode)
-    Clear-Host
-    . $ScriptBlock -AuthHeader $global:ToolkitAuthHeader -RepoOwner $global:ToolkitRepoOwner -TargetRepo $global:ToolkitTargetRepo -Branch $global:ToolkitBranch
-
-} catch {
-    Write-Host "`n[!] Critical Failure during initialization: $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Press [Enter] to exit"
-} finally {
-    if ($Mutex) {
-        $Mutex.ReleaseMutex()
-        $Mutex.Dispose()
-    }
-}
+# --- ADMIN PANEL ---
+Show-ConfigMenu
 
 # ===TOOLKIT_CONFIG_BEGIN===
 # {
