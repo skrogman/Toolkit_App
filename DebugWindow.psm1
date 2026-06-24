@@ -167,7 +167,7 @@ function Write-DebugWindow {
             }
         }
     }
-    if (-not $wrote) { Write-Host $line -ForegroundColor DarkGray }
+    # silently drop if debug window is not running
 }
 
 function Stop-DebugWindow {

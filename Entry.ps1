@@ -27,9 +27,8 @@ function Write-Log { param($Level,$Message)
     if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
         $safeLevel = if ($Level -in @('INFO','WARN','ERROR','DEBUG')) { $Level } else { 'INFO' }
         Write-DebugWindow -Message "[$Level] $Message" -Level $safeLevel
-    } else {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] [$Level] $Message" -ForegroundColor DarkGray
     }
+    # silently drop when no debug window — internal diagnostics only
 }
 
 try {
