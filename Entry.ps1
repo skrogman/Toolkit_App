@@ -24,7 +24,7 @@ if ($global:ToolkitTargetRepo) { $TargetRepo = $global:ToolkitTargetRepo }
 if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 
 function Write-Log { param($Level,$Message)
-    if ($Global:DebugSync -and $Global:DebugSync.Running -and (Get-Command Write-DebugWindow -EA SilentlyContinue)) {
+    if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
         $safeLevel = if ($Level -in @('INFO','WARN','ERROR','DEBUG')) { $Level } else { 'INFO' }
         Write-DebugWindow -Message "[$Level] $Message" -Level $safeLevel
     } else {
@@ -297,8 +297,16 @@ try {
         }
         [void]$ListView.add_SelectedItemChanged($OnSelectionChanged)
 
-        # Initial load
-        & $global:BuildInfoPane -Index 0
+        # Initial load — show last run output if captured, otherwise show first module info
+        if ($global:LastModuleOutput) {
+            $runName = if ($global:LastModuleRun) { $global:LastModuleRun.ToUpper() } else { "LAST RUN" }
+            $InfoFrame.Title = "  $runName — OUTPUT  "
+            $global:InfoView.Text = "`n  $runName`n  ══════════════════════════════`n`n$global:LastModuleOutput"
+            $global:InfoView.SetNeedsDisplay()
+            $global:LastModuleOutput = $null
+        } else {
+            & $global:BuildInfoPane -Index 0
+        }
 
         # Enter / open handler
         $OnItemOpened = [System.Action[Terminal.Gui.ListViewItemEventArgs]]{
@@ -330,23 +338,54 @@ try {
             Clear-Host
             Write-Log "INFO" "Fetching module: $global:TargetModule"
 
-            $CacheBuster = [guid]::NewGuid().ToString()
-            $FetchUrl    = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
+            $CacheBuster    = [guid]::NewGuid().ToString()
+            $FetchUrl       = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
+            $transcriptFile = Join-Path $env:TEMP "toolkit_module_run.log"
 
             try {
                 $FetchParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; ErrorAction = "Stop" }
                 if ($AuthHeader) { $FetchParams.Headers = $AuthHeader }
-                $ModuleCode = Invoke-RestMethod @FetchParams
-
+                $ModuleCode  = Invoke-RestMethod @FetchParams
                 $ScriptBlock = [scriptblock]::Create($ModuleCode)
-                . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule
+
+                try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
+                Start-Transcript -Path $transcriptFile -Force | Out-Null
+                try {
+                    . $ScriptBlock -AuthHeader $AuthHeader -RepoOwner $RepoOwner -RepoName $TargetRepo -Branch $Branch -AppName $global:TargetModule
+                } finally {
+                    try { Stop-Transcript | Out-Null } catch {}
+                }
 
             } catch {
+                try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
                 $errMsg = "[!] CRASH in $($global:TargetModule): $($_.Exception.Message)"
                 Write-Host "`n$errMsg" -ForegroundColor Red
-                if ($Global:DebugSync -and $Global:DebugSync.Running -and (Get-Command Write-DebugWindow -EA SilentlyContinue)) {
+                if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                     Write-DebugWindow $errMsg -Level ERROR
                 }
+            }
+
+            # Parse transcript into right-pane content for next TUI iteration
+            $global:LastModuleRun    = $global:TargetModule
+            $global:LastModuleOutput = $null
+            if (Test-Path $transcriptFile) {
+                try {
+                    $rawLines = Get-Content $transcriptFile -Encoding UTF8
+                    $startIdx = 0
+                    for ($i = 0; $i -lt $rawLines.Count; $i++) {
+                        if ($rawLines[$i] -match '^Transcript started') { $startIdx = $i + 1; break }
+                    }
+                    $endIdx = $rawLines.Count
+                    for ($i = $rawLines.Count - 1; $i -ge 0; $i--) {
+                        if ($rawLines[$i] -match '^\*{4,}') { $endIdx = $i; break }
+                    }
+                    if ($endIdx -gt $startIdx) {
+                        $bodyLines = $rawLines[$startIdx..($endIdx - 1)]
+                        $cleaned   = $bodyLines | ForEach-Object { $_ -replace '\x1B\[[0-9;]*[mGKHFABCDsuJnphfABCDR]', '' }
+                        $global:LastModuleOutput = ($cleaned -join "`n").Trim()
+                    }
+                } catch { }
+                Remove-Item $transcriptFile -Force -ErrorAction SilentlyContinue
             }
 
             Write-Host "`n─────────────────────────────────────────────" -ForegroundColor DarkGray

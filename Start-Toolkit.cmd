@@ -164,6 +164,15 @@ function Get-DecodedToken($Config) {
 }
 
 
+function Test-DebugWindowAlive {
+    $pf = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    if (-not (Test-Path $pf)) { return $false }
+    $dpid = try { [int](Get-Content $pf -Raw).Trim() } catch { return $false }
+    if ($dpid -le 0) { return $false }
+    $proc = Get-Process -Id $dpid -EA SilentlyContinue
+    return ($null -ne $proc -and -not $proc.HasExited)
+}
+
 function Get-ConsoleWindowRect {
     try {
         Add-Type -TypeDefinition @'
@@ -219,7 +228,7 @@ function Show-ConfigMenu {
         Write-Host "             IR TOOLKIT - LOCAL ADMINISTRATION PANEL                  " -ForegroundColor Yellow
         Write-Host "=====================================================================" -ForegroundColor Yellow
         $_isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-        $_dbgTag  = if ($Global:DebugSync -and $Global:DebugSync.Running) { " [Running]" } else { "" }
+        $_dbgTag  = if (Test-DebugWindowAlive) { " [Running]" } else { "" }
         $_admTag  = if ($_isAdmin) { " [Elevated]" } else { " [Not Elevated]" }
 
         Write-Host "  1) Open Debug Console$_dbgTag" -ForegroundColor Cyan
@@ -235,7 +244,7 @@ function Show-ConfigMenu {
 
         switch ($MenuChoice.Trim()) {
             "1" {
-                if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                if (Test-DebugWindowAlive) {
                     Write-Host "[!] Debug console is already open." -ForegroundColor Yellow
                     Start-Sleep -Seconds 1; continue
                 }
@@ -273,12 +282,12 @@ function Show-ConfigMenu {
             "6" {
                 if ($_isAdmin) {
                     Write-Host "`n[!] Already running as Administrator." -ForegroundColor Yellow
-                    if ($Global:DebugSync -and $Global:DebugSync.Running) { Write-DebugWindow "Already elevated — no relaunch needed." -Level WARN }
+                    if (Get-Command Write-DebugWindow -EA SilentlyContinue) { Write-DebugWindow "Already elevated — no relaunch needed." -Level WARN }
                     Start-Sleep -Seconds 2
                 } else {
                     $CmdFile = Join-Path $ScriptRootPath 'Start-Toolkit.cmd'
                     Write-Host "`n  Launching: $CmdFile" -ForegroundColor DarkGray
-                    if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                    if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                         Write-DebugWindow "Relaunching as Administrator — debug console will stay open." -Level WARN
                         Start-Sleep -Milliseconds 500
                     }
@@ -296,7 +305,7 @@ function Show-ConfigMenu {
                         Write-Host "`n[!] Elevation failed or UAC was denied." -ForegroundColor Red
                         Write-Host "    $($_.Exception.Message)" -ForegroundColor DarkRed
                         Write-Host "    Tip: right-click Start-Toolkit.cmd → 'Run as administrator'" -ForegroundColor Yellow
-                        if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                        if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                             Write-DebugWindow "Elevation FAILED: $($_.Exception.Message)" -Level ERROR
                         }
                         Read-Host "`nPress [Enter] to return to menu"
@@ -317,9 +326,9 @@ function Show-ConfigMenu {
                     $global:ToolkitRepoOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
                     $global:ToolkitTargetRepo = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
                     $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
-                    $global:ToolkitDebugMode  = ($Global:DebugSync -and $Global:DebugSync.Running)
+                    $global:ToolkitDebugMode  = (Test-DebugWindowAlive)
 
-                    if ($Global:DebugSync -and $Global:DebugSync.Running) {
+                    if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                         $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
                         Write-DebugWindow "=== AUTHENTICATION ===" -Level INFO
                         Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
@@ -403,7 +412,7 @@ try {
     # --- [5] LOAD ENTRY.PS1 — local file in debug mode, CDN otherwise ---
     $LocalEntry = Join-Path $ScriptRootPath 'Entry.ps1'
     if ($global:ToolkitDebugMode -and (Test-Path $LocalEntry)) {
-        if ($Global:DebugSync -and $Global:DebugSync.Running) {
+        if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
             Write-DebugWindow "Loading local Entry.ps1 (debug mode — no CDN)" -Level DEBUG
         }
         $MasterCode = Get-Content -Path $LocalEntry -Raw

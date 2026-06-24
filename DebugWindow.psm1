@@ -32,7 +32,7 @@ Add-Type -AssemblyName PresentationFramework, WindowsBase
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Toolkit Live Debug Console" Height="550" Width="820" Topmost="True">
+        Title="Toolkit Live Debug Console" Height="550" Width="820">
     <Grid Background="#F4F4F5">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -116,13 +116,18 @@ $btnSave.Add_Click({
         catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Save Error") }
     }
 })
-$window.Add_Closed({ $timer.Stop() })
+$window.Add_Closed({
+    $timer.Stop()
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.InvokeShutdown()
+})
 if ($X -ge 0 -and $Y -ge 0) {
     $window.WindowStartupLocation = [System.Windows.WindowStartupLocation]::Manual
     $window.Left = $X
     $window.Top  = $Y
 }
-$window.ShowDialog() | Out-Null
+$window.ShowActivated = $false
+$window.Show()
+[System.Windows.Threading.Dispatcher]::Run()
 '@
 
     [System.IO.File]::WriteAllText($uiScript, $wpfCode, [System.Text.Encoding]::UTF8)
@@ -146,14 +151,21 @@ function Write-DebugWindow {
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string]$Message,
         [ValidateSet("INFO","WARN","ERROR","DEBUG")][string]$Level = "INFO"
     )
-    $ts   = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-    $line = "[$ts] [$($Level.PadRight(5))] $Message"
-
-    if ($Global:DebugSync.Running -and $Global:DebugSync.LogFile) {
-        [System.IO.File]::AppendAllText($Global:DebugSync.LogFile, "$line`r`n", [System.Text.Encoding]::UTF8)
-    } else {
-        Write-Host $line -ForegroundColor DarkGray
+    $logFile = Join-Path $env:TEMP "toolkit_debug_active.log"
+    $pidFile = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $line    = "[$ts] [$($Level.PadRight(5))] $Message"
+    $wrote   = $false
+    if ((Test-Path $logFile) -and (Test-Path $pidFile)) {
+        $dpid = try { [int](Get-Content $pidFile -Raw).Trim() } catch { -1 }
+        if ($dpid -gt 0) {
+            $proc = Get-Process -Id $dpid -EA SilentlyContinue
+            if ($proc -and -not $proc.HasExited) {
+                try { [System.IO.File]::AppendAllText($logFile, "$line`r`n", [System.Text.Encoding]::UTF8); $wrote = $true } catch {}
+            }
+        }
     }
+    if (-not $wrote) { Write-Host $line -ForegroundColor DarkGray }
 }
 
 function Stop-DebugWindow {
