@@ -59,7 +59,7 @@ function Write-EmbeddedConfig($Config) {
     } else {
         $content = $content.TrimEnd() + "`r`n`r`n$block`r`n"
     }
-    [System.IO.File]::WriteAllText($global:ToolkitSelfPath, $content, [System.Text.Encoding]::UTF8)
+    [System.IO.File]::WriteAllText($global:ToolkitSelfPath, $content, [System.Text.UTF8Encoding]::new($false))
 }
 
 # Ensure shared dir exists (used by Option 6 elevation flag)
@@ -376,7 +376,7 @@ function Invoke-PublishToBootstrap {
             $outLines.Add('# ===TOOLKIT_CONFIG_END===')
         }
 
-        [System.IO.File]::WriteAllLines($BootstrapPath, $outLines.ToArray(), [System.Text.Encoding]::UTF8)
+        [System.IO.File]::WriteAllLines($BootstrapPath, $outLines.ToArray(), [System.Text.UTF8Encoding]::new($false))
         Write-Host "`n  [+] Config published — Bootstrap.cmd is now self-contained." -ForegroundColor Green
         Write-Host "  Distribute Bootstrap.cmd to operators as a single file." -ForegroundColor DarkGray
     } catch {
