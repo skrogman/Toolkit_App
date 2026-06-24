@@ -49,8 +49,10 @@ try {
 # Catch the environment flag if we just did a PS5 -> PS7 Engine Handoff
 if ($env:TK_FORCE_MENU -eq "1") { $ShiftPressed = $true }
 
-# Catch the flag file written by option 6 before elevation — survives UAC process boundary
-$_AdminMenuFlag = Join-Path $env:TEMP "toolkit_admin_menu.flag"
+# Catch the flag file written by option 6 before elevation — shared dir survives cross-user UAC boundary
+$_ToolkitShared = Join-Path $env:ProgramData "CassenaCareToolkit"
+if (-not (Test-Path $_ToolkitShared)) { $null = New-Item -Path $_ToolkitShared -ItemType Directory -Force -ErrorAction SilentlyContinue }
+$_AdminMenuFlag = Join-Path $_ToolkitShared "toolkit_admin_menu.flag"
 if (Test-Path $_AdminMenuFlag) {
     $ShiftPressed = $true
     Remove-Item $_AdminMenuFlag -Force -ErrorAction SilentlyContinue
@@ -165,7 +167,7 @@ function Get-DecodedToken($Config) {
 
 
 function Test-DebugWindowAlive {
-    $pf = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    $pf = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.pid"
     if (-not (Test-Path $pf)) { return $false }
     $dpid = try { [int](Get-Content $pf -Raw).Trim() } catch { return $false }
     if ($dpid -le 0) { return $false }
@@ -192,8 +194,8 @@ public class ConWin {
 
 function Show-ConfigMenu {
     # --- Auto-reconnect to debug window from pre-elevation session ---
-    $pidFile = Join-Path $env:TEMP "toolkit_debug_active.pid"
-    $logFile = Join-Path $env:TEMP "toolkit_debug_active.log"
+    $pidFile = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.pid"
+    $logFile = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.log"
     if ((Test-Path $pidFile) -and (Test-Path $logFile)) {
         $savedPid = try { [int](Get-Content $pidFile -Raw).Trim() } catch { -1 }
         if ($savedPid -gt 0) {
@@ -292,7 +294,7 @@ function Show-ConfigMenu {
                         Start-Sleep -Milliseconds 500
                     }
                     Write-Host "[*] A UAC prompt will appear — click Yes to elevate..." -ForegroundColor Yellow
-                    $flagPath = Join-Path $env:TEMP "toolkit_admin_menu.flag"
+                    $flagPath = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_admin_menu.flag"
                     try {
                         # Flag written inside try — only persists if Start-Process succeeds
                         [System.IO.File]::WriteAllText($flagPath, "1")

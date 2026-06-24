@@ -6,9 +6,11 @@ $Global:DebugSync = [hashtable]::Synchronized(@{
 
 function Start-DebugWindow {
     param([int]$X = -1, [int]$Y = -1)
-    $logFile  = Join-Path $env:TEMP "toolkit_debug_active.log"
-    $pidFile  = Join-Path $env:TEMP "toolkit_debug_active.pid"
-    $uiScript = Join-Path $env:TEMP "toolkit_debug_ui.ps1"
+    $sharedDir = Join-Path $env:ProgramData "CassenaCareToolkit"
+    if (-not (Test-Path $sharedDir)) { $null = New-Item -Path $sharedDir -ItemType Directory -Force -ErrorAction SilentlyContinue }
+    $logFile  = Join-Path $sharedDir "toolkit_debug_active.log"
+    $pidFile  = Join-Path $sharedDir "toolkit_debug_active.pid"
+    $uiScript = Join-Path $env:TEMP  "toolkit_debug_ui.ps1"
 
     # Check if an existing window process is still alive (survives elevation relaunch)
     if (Test-Path $pidFile) {
@@ -151,8 +153,8 @@ function Write-DebugWindow {
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)][string]$Message,
         [ValidateSet("INFO","WARN","ERROR","DEBUG")][string]$Level = "INFO"
     )
-    $logFile = Join-Path $env:TEMP "toolkit_debug_active.log"
-    $pidFile = Join-Path $env:TEMP "toolkit_debug_active.pid"
+    $logFile = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.log"
+    $pidFile = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.pid"
     $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
     $line    = "[$ts] [$($Level.PadRight(5))] $Message"
     $wrote   = $false
