@@ -323,6 +323,56 @@ function Invoke-RoleManager {
 }
 
 
+function Invoke-PublishToBootstrap {
+    $Cfg = Read-EmbeddedConfig
+    if (-not $Cfg) {
+        Write-Host "[!] No config to publish — enroll a user via Option 2 first." -ForegroundColor Red
+        Read-Host "Press [Enter] to return"; return
+    }
+
+    # Locate Bootstrap.cmd
+    $BootstrapPath = Join-Path $ScriptRootPath "Bootstrap.cmd"
+    if (-not (Test-Path $BootstrapPath)) {
+        $BootstrapPath = (Read-Host "  Bootstrap.cmd not found in script dir. Enter full path").Trim()
+        if (-not (Test-Path $BootstrapPath)) {
+            Write-Host "  [!] File not found." -ForegroundColor Red
+            Read-Host "Press [Enter] to return"; return
+        }
+    }
+
+    Clear-Host
+    Write-Host "=== PUBLISH CONFIG TO BOOTSTRAP ===" -ForegroundColor Yellow
+    Write-Host "  Target : $BootstrapPath" -ForegroundColor DarkGray
+
+    # Show what will be published
+    $userCount = @($Cfg.Users.PSObject.Properties).Count
+    $roleCount = @($Cfg.Roles.PSObject.Properties).Count
+    Write-Host "  Users  : $userCount enrolled" -ForegroundColor DarkGray
+    Write-Host "  Roles  : $roleCount defined" -ForegroundColor DarkGray
+    Write-Host ""
+
+    if ((Read-Host "  Publish to Bootstrap.cmd? [y/N]").Trim().ToLower() -ne 'y') {
+        Write-Host "  Cancelled." -ForegroundColor Yellow; Start-Sleep 1; return
+    }
+
+    # Write config into Bootstrap.cmd's embedded block
+    $json    = $Cfg | ConvertTo-Json -Depth 10
+    $pfxd    = ($json -split '\r?\n' | ForEach-Object { "# $_" }) -join "`r`n"
+    $block   = "# ===TOOLKIT_CONFIG_BEGIN===`r`n$pfxd`r`n# ===TOOLKIT_CONFIG_END==="
+    $content = [System.IO.File]::ReadAllText($BootstrapPath, [System.Text.Encoding]::UTF8)
+
+    if ($content -match '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===') {
+        $content = $content -replace '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===', $block
+    } else {
+        $content = $content.TrimEnd() + "`r`n`r`n$block`r`n"
+    }
+
+    [System.IO.File]::WriteAllText($BootstrapPath, $content, [System.Text.Encoding]::UTF8)
+    Write-Host "`n  [+] Config published to Bootstrap.cmd — it is now self-contained." -ForegroundColor Green
+    Write-Host "  Distribute Bootstrap.cmd to operators as a single file." -ForegroundColor DarkGray
+    Read-Host "`n  Press [Enter] to return"
+}
+
 function Invoke-PATDiagnostic {
     $Cfg = Read-EmbeddedConfig
     if (-not $Cfg) {
@@ -656,9 +706,10 @@ function Show-ConfigMenu {
         Write-Host "  8) Manage Roles" -ForegroundColor Cyan
         Write-Host "  9) Embed Module Config (.TOOLKIT_CONFIG tags/metadata)" -ForegroundColor Cyan
         Write-Host "  0) Diagnose PAT / GitHub Connectivity" -ForegroundColor DarkYellow
+        Write-Host "  P) Publish Config → Bootstrap.cmd (make it self-contained)" -ForegroundColor Yellow
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
-        $MenuChoice = Read-Host "Select an administration option [0-9]"
+        $MenuChoice = Read-Host "Select an administration option [0-9/P]"
 
         switch ($MenuChoice.Trim()) {
             "1" {
@@ -791,6 +842,7 @@ function Show-ConfigMenu {
             "8" { Invoke-RoleManager }
             "9" { Invoke-ModuleConfigEditor }
             "0" { Invoke-PATDiagnostic }
+            "p" { Invoke-PublishToBootstrap }
         }
     }
 }

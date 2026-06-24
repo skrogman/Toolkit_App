@@ -23,6 +23,9 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = if ($PSScriptRoot -and $PSScriptRoot -ne '') { $PSScriptRoot }
              elseif ($env:TK_SELF) { Split-Path -Parent $env:TK_SELF }
              else { $PWD.Path }
+$global:BootstrapSelfPath = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
+                             elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
+                             else { $null }
 
 # --- ENGINE HANDOFF: PS 5.1 -> PS7 ---
 if ($PSVersionTable.PSVersion.Major -lt 7) {
@@ -60,11 +63,10 @@ if (-not $CreatedNew) {
     }
 }
 
-# --- READ CONFIG FROM Start-Toolkit.cmd ---
+# --- READ OWN EMBEDDED CONFIG ---
 function Read-ToolkitConfig {
-    $adminTool = Join-Path $ScriptDir "Start-Toolkit.cmd"
-    if (-not (Test-Path $adminTool)) { return $null }
-    $lines     = [System.IO.File]::ReadAllLines($adminTool, [System.Text.Encoding]::UTF8)
+    if (-not $global:BootstrapSelfPath) { return $null }
+    $lines     = [System.IO.File]::ReadAllLines($global:BootstrapSelfPath, [System.Text.Encoding]::UTF8)
     $inBlock   = $false
     $jsonLines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $lines) {
@@ -128,7 +130,7 @@ function Get-DecodedToken($Config) {
 try {
     $Config = Read-ToolkitConfig
     if (-not $Config) {
-        throw "No configuration found. Ensure Start-Toolkit.cmd is in the same folder and a user has been enrolled."
+        throw "No configuration embedded in this Bootstrap. Use Start-Toolkit.cmd Option P to publish config here."
     }
 
     $AuthResult = Get-DecodedToken -Config $Config
@@ -164,3 +166,7 @@ try {
 } finally {
     if ($Mutex) { $Mutex.ReleaseMutex(); $Mutex.Dispose() }
 }
+
+# ===TOOLKIT_CONFIG_BEGIN===
+# {}
+# ===TOOLKIT_CONFIG_END===
