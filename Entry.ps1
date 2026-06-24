@@ -23,6 +23,10 @@ if ($global:ToolkitRepoOwner)  { $RepoOwner  = $global:ToolkitRepoOwner  }
 if ($global:ToolkitTargetRepo) { $TargetRepo = $global:ToolkitTargetRepo }
 if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 
+$AllowedTags = if ($global:ToolkitAllowedTags -and $global:ToolkitAllowedTags.Count -gt 0) {
+    @($global:ToolkitAllowedTags)
+} else { $null }
+
 function Write-Log { param($Level,$Message)
     if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
         $safeLevel = if ($Level -in @('INFO','WARN','ERROR','DEBUG')) { $Level } else { 'INFO' }
@@ -77,6 +81,7 @@ try {
             Write-Log "INFO" "  Inventorying: $($Dir.name)"
             $Synopsis  = "IR & Admin module."
             $Scripts   = [System.Collections.Generic.List[hashtable]]::new()
+            $ModCfg    = $null
 
             try {
                 # Get full directory listing
@@ -103,6 +108,10 @@ try {
 
                     if ($File.name -eq 'Entry.ps1') {
                         if ($Desc) { $Synopsis = $Desc }
+                        # Extract embedded module config from .TOOLKIT_CONFIG block
+                        if ($Raw -match '(?ms)\.TOOLKIT_CONFIG\s*(\{.*?\})\s*(?=#>|\.[A-Z])') {
+                            try { $ModCfg = $Matches[1] | ConvertFrom-Json } catch { }
+                        }
                     } else {
                         $Scripts.Add(@{ Name = ($File.name -replace '\.ps1$', ''); Desc = $Desc })
                     }
@@ -137,19 +146,61 @@ try {
                 Write-Log "WARN" "    Could not inventory $($Dir.name): $($_.Exception.Message)"
             }
 
+            # Resolve metadata — prefer .TOOLKIT_CONFIG, fall back to scraped values / defaults
+            $DisplayName    = if ($ModCfg -and $ModCfg.displayName)        { $ModCfg.displayName }        else { $Dir.name }
+            $Synopsis       = if ($ModCfg -and $ModCfg.description)        { $ModCfg.description }        else { $Synopsis }
+            $ModuleTags     = if ($ModCfg -and $ModCfg.tags)               { @($ModCfg.tags) }            else { @("basic-access") }
+            $ModuleDisabled = if ($ModCfg -and ($null -ne $ModCfg.disabled)){ [bool]$ModCfg.disabled }    else { $false }
+            $RequiredElev   = if ($ModCfg) { $ModCfg.requiredElevation } else { $null }
+            $DangerLevel    = if ($ModCfg) { $ModCfg.dangerLevel }       else { $null }
+            $ModCategory    = if ($ModCfg) { $ModCfg.category }          else { $null }
+            $ModVersion     = if ($ModCfg) { $ModCfg.version }           else { $null }
+            $EstRuntime     = if ($ModCfg) { $ModCfg.estimatedRuntime }  else { $null }
+            $OutputType     = if ($ModCfg) { $ModCfg.outputType }        else { $null }
+            $ModAuthor      = if ($ModCfg) { $ModCfg.author }            else { $null }
+
             $global:Modules.Add(@{
-                Name      = $Dir.name
-                Synopsis  = $Synopsis
-                Scripts   = $Scripts
+                Name            = $Dir.name
+                DisplayName     = $DisplayName
+                Synopsis        = $Synopsis
+                Scripts         = $Scripts
+                Tags            = $ModuleTags
+                Disabled        = $ModuleDisabled
+                RequiredElev    = $RequiredElev
+                DangerLevel     = $DangerLevel
+                Category        = $ModCategory
+                Version         = $ModVersion
+                EstRuntime      = $EstRuntime
+                OutputType      = $OutputType
+                Author          = $ModAuthor
             })
         }
     } catch {
         Write-Log "ERROR" "GitHub API error: $($_.Exception.Message)"
     }
 
+    # Remove disabled modules
+    $global:Modules = [System.Collections.Generic.List[hashtable]](
+        $global:Modules | Where-Object { -not $_.Disabled }
+    )
+
+    # Tag-based access control — $null means no filter (anonymous launch or admin path)
+    if ($null -ne $AllowedTags) {
+        $global:Modules = [System.Collections.Generic.List[hashtable]](
+            $global:Modules | Where-Object {
+                $modTags = $_.Tags
+                $AllowedTags | Where-Object {
+                    $pat = $_
+                    $modTags | Where-Object { $_ -like $pat } | Select-Object -First 1
+                } | Select-Object -First 1
+            }
+        )
+        Write-Log "INFO" "Tag filter applied: $($AllowedTags -join ', ') — $($global:Modules.Count) module(s) visible"
+    }
+
     # Build the flat label list for Terminal.Gui's ListView
     $global:MenuLabels = [System.Collections.ArrayList]@()
-    foreach ($m in $global:Modules) { [void]$global:MenuLabels.Add("  $($m.Name)") }
+    foreach ($m in $global:Modules) { [void]$global:MenuLabels.Add("  $($m.DisplayName)") }
     [void]$global:MenuLabels.Add("  ─── Exit Toolkit ───")
 
     # ----------------------------------------------------------------
@@ -250,7 +301,7 @@ try {
             } else {
                 $m  = $global:Modules[$Index]
 
-                $t  = "`n  $($m.Name.ToUpper())`n"
+                $t  = "`n  $($m.DisplayName.ToUpper())`n"
                 $t += "  ══════════════════════════════`n`n"
 
                 # Word-wrap synopsis at ~38 chars
@@ -262,6 +313,24 @@ try {
                 }
                 if ($line.Trim()) { $wrapped += $line.TrimEnd() }
                 $t += ($wrapped -join "`n") + "`n"
+
+                # Module metadata badges (only non-empty fields)
+                $hasMeta = $m.Category -or $m.RequiredElev -or $m.DangerLevel -or $m.EstRuntime -or $m.OutputType -or $m.Version
+                if ($hasMeta) {
+                    $t += "`n  ── MODULE DETAILS ─────────────`n"
+                    if ($m.Category)     { $t += "  Category  : $($m.Category)`n" }
+                    if ($m.RequiredElev) { $t += "  Elevation : $($m.RequiredElev)`n" }
+                    if ($m.DangerLevel)  { $t += "  Risk      : $($m.DangerLevel)`n" }
+                    if ($m.EstRuntime)   { $t += "  Runtime   : $($m.EstRuntime)`n" }
+                    if ($m.OutputType)   { $t += "  Output    : $($m.OutputType)`n" }
+                    if ($m.Version) {
+                        $verLine = "  Version   : $($m.Version)"
+                        if ($m.Author) { $verLine += "   by $($m.Author)" }
+                        $t += "$verLine`n"
+                    } elseif ($m.Author) {
+                        $t += "  Author    : $($m.Author)`n"
+                    }
+                }
 
                 # Script inventory
                 $t += "`n  ── SCRIPTS ($($m.Scripts.Count + 1) files) ──────────`n"

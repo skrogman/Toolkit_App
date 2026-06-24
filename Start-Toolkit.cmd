@@ -87,81 +87,215 @@ function New-UserTokenConfig {
     Write-Host "=== ROLL / ENCODE USER PAT DATA ===" -ForegroundColor Yellow
     $Username = Read-Host "Enter Target Username (e.g., Steve)"
     if ([string]::IsNullOrEmpty($Username)) { return }
-    
+
     $RawToken = Read-Host "Paste New GitHub Plain-text PAT"
-    
+
     Write-Host "Establish Access PIN for this Profile: " -NoNewline -ForegroundColor White
-    $UserPin = Read-Host -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($UserPin)
-    $PlainPin = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    
+    $SecurePinEnroll = Read-Host -AsSecureString
+    $BSTR_E    = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePinEnroll)
+    $PlainPin  = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR_E)
+
     if ([string]::IsNullOrEmpty($RawToken) -or [string]::IsNullOrEmpty($PlainPin)) {
         Write-Host "`n[-] Error: Token and PIN cannot be blank." -ForegroundColor Red
         Start-Sleep -Seconds 2
         return
     }
 
-    $Salt = [guid]::NewGuid().ToString().Replace("-","").Substring(0,16)
-    $SecretKey = "$PlainPin$Salt".PadRight(32).Substring(0,32)
-    
-    $TokenBytes = [System.Text.Encoding]::Unicode.GetBytes($RawToken)
-    $KeyBytes   = [System.Text.Encoding]::Unicode.GetBytes($SecretKey)
-    $MixedBytes = New-Object byte[] $TokenBytes.Length
-    
-    for($i=0; $i -lt $TokenBytes.Length; $i++) {
-        $MixedBytes[$i] = $TokenBytes[$i] -bxor $KeyBytes[$i % $KeyBytes.Length]
+    # AES-256-CBC + PBKDF2 (100k iterations, SHA-256)
+    $rng       = [System.Security.Cryptography.RNGCryptoServiceProvider]::Create()
+    $saltBytes = New-Object byte[] 32; $rng.GetBytes($saltBytes)
+    $ivBytes   = New-Object byte[] 16; $rng.GetBytes($ivBytes)
+    $derive    = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+                     $PlainPin, $saltBytes, 100000,
+                     [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $key       = $derive.GetBytes(32)
+    $aes       = [System.Security.Cryptography.Aes]::Create()
+    $aes.Key   = $key; $aes.IV = $ivBytes
+    $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $enc       = $aes.CreateEncryptor()
+    $plain     = [System.Text.Encoding]::UTF8.GetBytes($RawToken)
+    $cipher    = $enc.TransformFinalBlock($plain, 0, $plain.Length)
+    $tokenStr  = "v2|{0}|{1}|{2}" -f [Convert]::ToBase64String($saltBytes),
+                                       [Convert]::ToBase64String($ivBytes),
+                                       [Convert]::ToBase64String($cipher)
+
+    $CurrentConfig = [PSCustomObject]@{
+        PublicRepo = [PSCustomObject]@{ Owner = "skrogman"; Name = "Toolkit_App"; Branch = "main" }
+        Roles      = [PSCustomObject]@{
+            admin = [PSCustomObject]@{ tags = @("*") }
+            basic = [PSCustomObject]@{ tags = @("basic-access") }
+        }
+        Users    = [PSCustomObject]@{}
+        Settings = [PSCustomObject]@{
+            PublicOwner  = "skrogman"
+            PublicRepo   = "Toolkit_Modules"
+            PublicBranch = "main"
+            VerboseMode  = "true"
+            DefaultRole  = "basic"
+        }
     }
-    
-    $EncodedPayload = [System.Convert]::ToBase64String($MixedBytes)
-    $FinalConfigString = "$Salt|$EncodedPayload|$([guid]::NewGuid().ToString().Replace('-',''))"
-    
-    $CurrentConfig = @{ PublicRepo = @{ Owner = "skrogman"; Name = "Toolkit_App"; Branch = "main" }; Users = @{}; Settings = @{ PublicOwner = "skrogman"; PublicRepo = "Toolkit_Modules"; PublicBranch = "main"; VerboseMode = "true" } }
     if (Test-Path $ConfigFile) {
         $CurrentConfig = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
     }
-    
-    $CurrentConfig.Users.$Username = $FinalConfigString
-    $CurrentConfig | ConvertTo-Json -Depth 5 | Out-File -FilePath $ConfigFile -Encoding utf8
-    
-    Write-Host "`n[+] SUCCESS: Profile '$Username' securely encoded to config." -ForegroundColor Green
+
+    $existingRoles = if ($CurrentConfig.Roles) {
+        ($CurrentConfig.Roles.PSObject.Properties.Name) -join ", "
+    } else { "(none yet)" }
+    Write-Host "  Available roles: $existingRoles" -ForegroundColor DarkGray
+    $AssignedRole = (Read-Host "Assign role for '$Username' (blank = use DefaultRole)").Trim()
+
+    if (-not $CurrentConfig.Users) {
+        $CurrentConfig | Add-Member -NotePropertyName Users -NotePropertyValue ([PSCustomObject]@{}) -Force
+    }
+    $userEntry = [PSCustomObject]@{ token = $tokenStr; role = $AssignedRole }
+    if ($CurrentConfig.Users.PSObject.Properties[$Username]) {
+        $CurrentConfig.Users.$Username = $userEntry
+    } else {
+        $CurrentConfig.Users | Add-Member -NotePropertyName $Username -NotePropertyValue $userEntry -Force
+    }
+    $CurrentConfig | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+
+    Write-Host "`n[+] SUCCESS: Profile '$Username' enrolled with AES-256 encryption." -ForegroundColor Green
     Start-Sleep -Seconds 2
     Clear-Host
 }
 
 function Get-DecodedToken($Config) {
     Write-Host "`n=== PROFILE ACCESS VALIDATION ===" -ForegroundColor Yellow
-    $Username = Read-Host "Identify User Profile"
-    
+    $Username = (Read-Host "Identify User Profile").Trim()
+
     if (-not $Config.Users.$Username) {
         throw "Requested profile '$Username' does not exist in the local configuration storage."
     }
-    
+    $script:LastAuthedUsername = $Username
+
     Write-Host "Enter Security PIN for '$Username': " -NoNewline -ForegroundColor White
     $SecurePin = Read-Host -AsSecureString
-    $BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePin)
-    $UserPin = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
-    Write-Host "" 
+    $BSTR_D    = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecurePin)
+    $UserPin   = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR_D)
+    Write-Host ""
 
-    $EncodedToken = $Config.Users.$Username
-    
-    if ($EncodedToken -match '\|') {
-        $Segments = $EncodedToken.Split('|')
-        $Salt = $Segments[0]
-        $Payload = $Segments[1]
-        
-        $SecretKey = "$UserPin$Salt".PadRight(32).Substring(0,32)
-        $MixedBytes = [System.Convert]::FromBase64String($Payload)
-        $KeyBytes   = [System.Text.Encoding]::Unicode.GetBytes($SecretKey)
-        $DecodedBytes = New-Object byte[] $MixedBytes.Length
-        
-        for($i=0; $i -lt $MixedBytes.Length; $i++) {
-            $DecodedBytes[$i] = $MixedBytes[$i] -bxor $KeyBytes[$i % $KeyBytes.Length]
+    $userObj  = $Config.Users.$Username
+    $tokenStr = if ($userObj -is [string]) { $userObj } else { $userObj.token }
+    $roleStr  = if ($userObj -is [string]) { $null    } else { $userObj.role  }
+
+    $parts = $tokenStr -split '\|'
+    if ($parts[0] -ne 'v2') {
+        throw "Profile '$Username' uses an outdated token format. Please re-enroll via Option 2."
+    }
+
+    try {
+        $saltBytes = [Convert]::FromBase64String($parts[1])
+        $ivBytes   = [Convert]::FromBase64String($parts[2])
+        $cipher    = [Convert]::FromBase64String($parts[3])
+        $derive    = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+                         $UserPin, $saltBytes, 100000,
+                         [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+        $key       = $derive.GetBytes(32)
+        $aes       = [System.Security.Cryptography.Aes]::Create()
+        $aes.Key   = $key; $aes.IV = $ivBytes
+        $aes.Mode    = [System.Security.Cryptography.CipherMode]::CBC
+        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $dec   = $aes.CreateDecryptor()
+        $plain = $dec.TransformFinalBlock($cipher, 0, $cipher.Length)
+        $pat   = [System.Text.Encoding]::UTF8.GetString($plain).Trim()
+    } catch [System.Security.Cryptography.CryptographicException] {
+        throw "Incorrect PIN for profile '$Username'."
+    }
+
+    return @{ PAT = $pat; Role = $roleStr }
+}
+
+function Invoke-RoleManager {
+    while ($true) {
+        Clear-Host
+        Write-Host "=== ROLE MANAGER ===" -ForegroundColor Yellow
+
+        $Cfg = if (Test-Path $ConfigFile) { Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json } else { $null }
+        $DefaultRole = if ($Cfg -and $Cfg.Settings -and $Cfg.Settings.DefaultRole) { $Cfg.Settings.DefaultRole } else { "(not set)" }
+        Write-Host "  Default Role: $DefaultRole`n" -ForegroundColor DarkGray
+
+        if ($Cfg -and $Cfg.Roles) {
+            Write-Host "  Configured Roles:" -ForegroundColor Yellow
+            $Cfg.Roles.PSObject.Properties | ForEach-Object {
+                $tags = if ($_.Value.tags) { $_.Value.tags -join ', ' } else { "(no tags)" }
+                Write-Host "    $($_.Name)  ->  $tags" -ForegroundColor Gray
+            }
+        } else {
+            Write-Host "  (No roles defined yet)" -ForegroundColor DarkGray
         }
-        
-        return [System.Text.Encoding]::Unicode.GetString($DecodedBytes).Trim().Replace("`0", "")
-    } else {
-        $RawBytes = [System.Convert]::FromBase64String($EncodedToken)
-        return [System.Text.Encoding]::UTF8.GetString($RawBytes).Trim().Replace("`0", "")
+
+        Write-Host ""
+        Write-Host "  a) Create / edit role" -ForegroundColor Cyan
+        Write-Host "  b) Delete role"        -ForegroundColor Cyan
+        Write-Host "  c) Set default role"   -ForegroundColor Cyan
+        Write-Host "  e) Back"               -ForegroundColor Gray
+        Write-Host ""
+
+        $RChoice = (Read-Host "  Select [a/b/c/e]").Trim().ToLower()
+
+        switch ($RChoice) {
+            "a" {
+                $RoleName = (Read-Host "  Role name (e.g. admin, analyst, basic)").Trim()
+                if ([string]::IsNullOrEmpty($RoleName)) { break }
+                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                if ($CfgW.Roles -and $CfgW.Roles.PSObject.Properties[$RoleName]) {
+                    Write-Host "  Current tags: $($CfgW.Roles.$RoleName.tags -join ', ')" -ForegroundColor DarkGray
+                }
+                $TagInput = (Read-Host "  Tags (comma-separated, wildcards ok, e.g. basic-access, *)").Trim()
+                $Tags = @($TagInput -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+                if ($Tags.Count -eq 0) { Write-Host "  [!] No tags provided." -ForegroundColor Red; Start-Sleep 1; break }
+                if (-not $CfgW.Roles) { $CfgW | Add-Member -NotePropertyName Roles -NotePropertyValue ([PSCustomObject]@{}) -Force }
+                $roleObj = [PSCustomObject]@{ tags = $Tags }
+                if ($CfgW.Roles.PSObject.Properties[$RoleName]) {
+                    $CfgW.Roles.$RoleName = $roleObj
+                } else {
+                    $CfgW.Roles | Add-Member -NotePropertyName $RoleName -NotePropertyValue $roleObj -Force
+                }
+                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-Host "  [+] Role '$RoleName' saved with tags: $($Tags -join ', ')" -ForegroundColor Green
+                Start-Sleep 1
+            }
+            "b" {
+                $RoleName = (Read-Host "  Role to delete").Trim()
+                if ([string]::IsNullOrEmpty($RoleName)) { break }
+                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                if (-not ($CfgW.Roles -and $CfgW.Roles.PSObject.Properties[$RoleName])) {
+                    Write-Host "  [!] Role '$RoleName' not found." -ForegroundColor Red; Start-Sleep 1; break
+                }
+                $affected = @($CfgW.Users.PSObject.Properties | Where-Object { $_.Value.role -eq $RoleName } | ForEach-Object { $_.Name })
+                if ($affected.Count -gt 0) {
+                    Write-Host "  [!] Warning: $($affected.Count) user(s) assigned this role: $($affected -join ', ')" -ForegroundColor Yellow
+                    if ((Read-Host "  Delete anyway? [y/N]").Trim().ToLower() -ne 'y') { break }
+                }
+                $newRoles = [PSCustomObject]@{}
+                $CfgW.Roles.PSObject.Properties | Where-Object { $_.Name -ne $RoleName } | ForEach-Object {
+                    $newRoles | Add-Member -NotePropertyName $_.Name -NotePropertyValue $_.Value -Force
+                }
+                $CfgW.Roles = $newRoles
+                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-Host "  [+] Role '$RoleName' deleted." -ForegroundColor Green
+                Start-Sleep 1
+            }
+            "c" {
+                if (-not ($Cfg -and $Cfg.Roles)) { Write-Host "  [!] No roles defined yet." -ForegroundColor Red; Start-Sleep 1; break }
+                $RoleName = (Read-Host "  Set default role").Trim()
+                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                if (-not $CfgW.Roles.PSObject.Properties[$RoleName]) {
+                    Write-Host "  [!] Role '$RoleName' does not exist." -ForegroundColor Red; Start-Sleep 1; break
+                }
+                if ($CfgW.Settings.PSObject.Properties['DefaultRole']) {
+                    $CfgW.Settings.DefaultRole = $RoleName
+                } else {
+                    $CfgW.Settings | Add-Member -NotePropertyName DefaultRole -NotePropertyValue $RoleName -Force
+                }
+                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                Write-Host "  [+] DefaultRole set to '$RoleName'." -ForegroundColor Green
+                Start-Sleep 1
+            }
+            "e" { return }
+        }
     }
 }
 
@@ -240,9 +374,10 @@ function Show-ConfigMenu {
         Write-Host "  5) Abort & Exit Completely" -ForegroundColor Red
         Write-Host "  6) Relaunch as Administrator$_admTag" -ForegroundColor Magenta
         Write-Host "  7) Authenticate & Launch Toolkit" -ForegroundColor Green
+        Write-Host "  8) Manage Roles" -ForegroundColor Cyan
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
-        $MenuChoice = Read-Host "Select an administration option [1-7]"
+        $MenuChoice = Read-Host "Select an administration option [1-8]"
 
         switch ($MenuChoice.Trim()) {
             "1" {
@@ -275,7 +410,16 @@ function Show-ConfigMenu {
                 if (Test-Path $ConfigFile) {
                     $Data = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
                     Write-Host "`nConfigured Profiles:" -ForegroundColor Yellow
-                    $Data.Users.PSObject.Properties | ForEach-Object { Write-Host " -> $($_.Name)" -ForegroundColor Gray }
+                    $Data.Users.PSObject.Properties | ForEach-Object {
+                        $roleTag = if ($_.Value -is [string]) {
+                            " [legacy token — re-enroll via Option 2]"
+                        } elseif ($_.Value.role) {
+                            " [role: $($_.Value.role)]"
+                        } else {
+                            " [role: (DefaultRole)]"
+                        }
+                        Write-Host " -> $($_.Name)$roleTag" -ForegroundColor Gray
+                    }
                 } else { Write-Host "[!] No configuration file detected yet." -ForegroundColor Red }
                 Read-Host "`nPress [Enter] to return to menu"
             }
@@ -320,19 +464,27 @@ function Show-ConfigMenu {
                     Start-Sleep -Seconds 2; continue
                 }
                 try {
-                    $Cfg   = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-                    $Token = Get-DecodedToken -Config $Cfg
+                    $Cfg        = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                    $AuthResult = Get-DecodedToken -Config $Cfg
+                    $Token      = $AuthResult.PAT
+                    $UserRole   = if ($AuthResult.Role) { $AuthResult.Role } else { $Cfg.Settings.DefaultRole }
+                    $RoleDef    = if ($Cfg.Roles -and $Cfg.Roles.$UserRole) { $Cfg.Roles.$UserRole } else { $null }
 
-                    $global:ToolkitAuthHeader = @{ Authorization = "Bearer $Token" }
-                    $global:ToolkitPAT        = $Token
-                    $global:ToolkitRepoOwner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
-                    $global:ToolkitTargetRepo = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
-                    $global:ToolkitBranch     = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
-                    $global:ToolkitDebugMode  = (Test-DebugWindowAlive)
+                    $global:ToolkitAuthHeader  = @{ Authorization = "Bearer $Token" }
+                    $global:ToolkitPAT         = $Token
+                    $global:ToolkitRepoOwner   = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
+                    $global:ToolkitTargetRepo  = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
+                    $global:ToolkitBranch      = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
+                    $global:ToolkitDebugMode   = (Test-DebugWindowAlive)
+                    $global:ToolkitAllowedTags = if ($RoleDef) { @($RoleDef.tags) } else { @() }
+                    $global:ToolkitUsername    = $script:LastAuthedUsername
+                    $global:ToolkitRole        = $UserRole
 
                     if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                         $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
                         Write-DebugWindow "=== AUTHENTICATION ===" -Level INFO
+                        Write-DebugWindow "User   : $($global:ToolkitUsername) [role: $UserRole]" -Level INFO
+                        Write-DebugWindow "Tags   : $($global:ToolkitAllowedTags -join ', ')" -Level INFO
                         Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
                         Write-DebugWindow "Token  : $Snip" -Level INFO
                         Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
@@ -351,6 +503,7 @@ function Show-ConfigMenu {
                     Read-Host "Press [Enter] to return to menu"
                 }
             }
+            "8" { Invoke-RoleManager }
         }
     }
 }
@@ -397,18 +550,24 @@ try {
         throw "Configuration file missing at: $ConfigFile. Hold down the SHIFT key on boot to open the setup menu."
     }
 
-    # --- [4] AUTH — skip if debug mode already set globals via option 1 ---
+    # --- [4] AUTH — skip if debug mode already set globals via option 7 ---
     if (-not $global:ToolkitAuthHeader) {
-        $Config    = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
-        $YourToken = Get-DecodedToken -Config $Config
+        $Config     = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+        $AuthResult = Get-DecodedToken -Config $Config
+        $YourToken  = $AuthResult.PAT
+        $UserRole   = if ($AuthResult.Role) { $AuthResult.Role } else { $Config.Settings.DefaultRole }
+        $RoleDef    = if ($Config.Roles -and $Config.Roles.$UserRole) { $Config.Roles.$UserRole } else { $null }
 
-        $global:ToolkitAuthHeader = @{ "Authorization" = "Bearer $YourToken" }
-        $env:GITHUB_TOKEN         = $YourToken
-        $global:GITHUB_TOKEN      = $YourToken
-        $global:ToolkitPAT        = $YourToken
-        $global:ToolkitRepoOwner  = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
-        $global:ToolkitTargetRepo = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
-        $global:ToolkitBranch     = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
+        $global:ToolkitAuthHeader  = @{ "Authorization" = "Bearer $YourToken" }
+        $env:GITHUB_TOKEN          = $YourToken
+        $global:GITHUB_TOKEN       = $YourToken
+        $global:ToolkitPAT         = $YourToken
+        $global:ToolkitRepoOwner   = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
+        $global:ToolkitTargetRepo  = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
+        $global:ToolkitBranch      = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
+        $global:ToolkitAllowedTags = if ($RoleDef) { @($RoleDef.tags) } else { @() }
+        $global:ToolkitUsername    = $script:LastAuthedUsername
+        $global:ToolkitRole        = $UserRole
     }
 
     # --- [5] LOAD ENTRY.PS1 — local file in debug mode, CDN otherwise ---
