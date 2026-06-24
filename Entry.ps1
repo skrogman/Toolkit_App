@@ -179,7 +179,19 @@ try {
             })
         }
     } catch {
-        Write-Log "ERROR" "GitHub API error: $($_.Exception.Message)"
+        $apiErr = $_.Exception.Message
+        Write-Log "ERROR" "GitHub API error: $apiErr"
+        Write-Host "`n[!] Module discovery failed: $apiErr" -ForegroundColor Red
+        Write-Host "    Repo  : $RepoOwner/$TargetRepo @ $Branch" -ForegroundColor DarkGray
+        Write-Host "    Auth  : $(if ($AuthHeader) { 'token present' } else { 'NO AUTH HEADER' })" -ForegroundColor DarkGray
+        if ($apiErr -match '404') {
+            Write-Host "`n    >> Private repo requires PAT with 'repo' scope (not just 'public_repo')." -ForegroundColor Yellow
+            Write-Host "    >> Fine-grained PAT: grant Contents=Read on $TargetRepo." -ForegroundColor Yellow
+            Write-Host "    >> Then re-enroll via Admin menu > Option 2.`n" -ForegroundColor Yellow
+        } elseif ($apiErr -match '401|Unauthorized') {
+            Write-Host "`n    >> PAT is invalid or revoked. Re-enroll via Admin menu > Option 2.`n" -ForegroundColor Yellow
+        }
+        Start-Sleep -Seconds 5
     }
 
     # Remove disabled modules
@@ -199,6 +211,15 @@ try {
             }
         )
         Write-Log "INFO" "Tag filter applied: $($AllowedTags -join ', ') — $($global:Modules.Count) module(s) visible"
+    }
+
+    if ($global:Modules.Count -eq 0) {
+        Write-Host "`n[!] No modules loaded — TUI will show only Exit." -ForegroundColor Yellow
+        Write-Host "    Check the error above if one appeared, or verify:" -ForegroundColor DarkGray
+        Write-Host "    1. PAT has 'repo' scope for private repos (re-enroll via Admin > Option 2)" -ForegroundColor DarkGray
+        Write-Host "    2. Repo '$TargetRepo' exists under '$RepoOwner'" -ForegroundColor DarkGray
+        Write-Host "    3. Your role's tags match at least one module's tags`n" -ForegroundColor DarkGray
+        Start-Sleep -Seconds 4
     }
 
     # Build the flat label list for Terminal.Gui's ListView
