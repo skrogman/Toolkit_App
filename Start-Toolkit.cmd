@@ -326,11 +326,10 @@ function Invoke-RoleManager {
 function Invoke-PublishToBootstrap {
     $Cfg = Read-EmbeddedConfig
     if (-not $Cfg) {
-        Write-Host "[!] No config to publish — enroll a user via Option 2 first." -ForegroundColor Red
+        Write-Host "[!] No config to publish — enroll a user first (Option 2)." -ForegroundColor Red
         Read-Host "Press [Enter] to return"; return
     }
 
-    # Locate Bootstrap.cmd
     $BootstrapPath = Join-Path $ScriptRootPath "Bootstrap.cmd"
     if (-not (Test-Path $BootstrapPath)) {
         $BootstrapPath = (Read-Host "  Bootstrap.cmd not found in script dir. Enter full path").Trim()
@@ -342,34 +341,48 @@ function Invoke-PublishToBootstrap {
 
     Clear-Host
     Write-Host "=== PUBLISH CONFIG TO BOOTSTRAP ===" -ForegroundColor Yellow
-    Write-Host "  Target : $BootstrapPath" -ForegroundColor DarkGray
+    Write-Host "  Target : $BootstrapPath`n" -ForegroundColor DarkGray
 
-    # Show what will be published
-    $userCount = @($Cfg.Users.PSObject.Properties).Count
-    $roleCount = @($Cfg.Roles.PSObject.Properties).Count
-    Write-Host "  Users  : $userCount enrolled" -ForegroundColor DarkGray
-    Write-Host "  Roles  : $roleCount defined" -ForegroundColor DarkGray
-    Write-Host ""
-
-    if ((Read-Host "  Publish to Bootstrap.cmd? [y/N]").Trim().ToLower() -ne 'y') {
+    if ((Read-Host "  Publish current config to Bootstrap.cmd? [y/N]").Trim().ToLower() -ne 'y') {
         Write-Host "  Cancelled." -ForegroundColor Yellow; Start-Sleep 1; return
     }
 
-    # Write config into Bootstrap.cmd's embedded block
-    $json    = $Cfg | ConvertTo-Json -Depth 10
-    $pfxd    = ($json -split '\r?\n' | ForEach-Object { "# $_" }) -join "`r`n"
-    $block   = "# ===TOOLKIT_CONFIG_BEGIN===`r`n$pfxd`r`n# ===TOOLKIT_CONFIG_END==="
-    $content = [System.IO.File]::ReadAllText($BootstrapPath, [System.Text.Encoding]::UTF8)
+    try {
+        $json      = $Cfg | ConvertTo-Json -Depth 10
+        $jsonLines = $json -split '\r?\n'
 
-    if ($content -match '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===') {
-        $content = $content -replace '(?ms)# ===TOOLKIT_CONFIG_BEGIN===.*?# ===TOOLKIT_CONFIG_END===', $block
-    } else {
-        $content = $content.TrimEnd() + "`r`n`r`n$block`r`n"
+        # Line-by-line replacement — avoids regex replace with multiline content
+        $allLines = [System.IO.File]::ReadAllLines($BootstrapPath, [System.Text.Encoding]::UTF8)
+        $outLines = [System.Collections.Generic.List[string]]::new()
+        $inBlock  = $false
+        $replaced = $false
+
+        foreach ($line in $allLines) {
+            if ($line -eq '# ===TOOLKIT_CONFIG_BEGIN===') {
+                $inBlock = $true
+                $outLines.Add('# ===TOOLKIT_CONFIG_BEGIN===')
+                foreach ($jl in $jsonLines) { $outLines.Add("# $jl") }
+                $outLines.Add('# ===TOOLKIT_CONFIG_END===')
+                $replaced = $true
+                continue
+            }
+            if ($line -eq '# ===TOOLKIT_CONFIG_END===') { $inBlock = $false; continue }
+            if (-not $inBlock) { $outLines.Add($line) }
+        }
+
+        if (-not $replaced) {
+            $outLines.Add('# ===TOOLKIT_CONFIG_BEGIN===')
+            foreach ($jl in $jsonLines) { $outLines.Add("# $jl") }
+            $outLines.Add('# ===TOOLKIT_CONFIG_END===')
+        }
+
+        [System.IO.File]::WriteAllLines($BootstrapPath, $outLines.ToArray(), [System.Text.Encoding]::UTF8)
+        Write-Host "`n  [+] Config published — Bootstrap.cmd is now self-contained." -ForegroundColor Green
+        Write-Host "  Distribute Bootstrap.cmd to operators as a single file." -ForegroundColor DarkGray
+    } catch {
+        Write-Host "`n  [!] Failed: $($_.Exception.Message)" -ForegroundColor Red
     }
 
-    [System.IO.File]::WriteAllText($BootstrapPath, $content, [System.Text.Encoding]::UTF8)
-    Write-Host "`n  [+] Config published to Bootstrap.cmd — it is now self-contained." -ForegroundColor Green
-    Write-Host "  Distribute Bootstrap.cmd to operators as a single file." -ForegroundColor DarkGray
     Read-Host "`n  Press [Enter] to return"
 }
 
