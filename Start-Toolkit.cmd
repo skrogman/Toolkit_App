@@ -346,21 +346,36 @@ function Invoke-ModuleConfigEditor {
     $Owner   = if ($global:ToolkitRepoOwner)  { $global:ToolkitRepoOwner  } else { "skrogman" }
     $Repo    = if ($global:ToolkitTargetRepo) { $global:ToolkitTargetRepo } else { "Toolkit_Modules" }
     $Branch  = if ($global:ToolkitBranch)     { $global:ToolkitBranch     } else { "main" }
-    $AuthHdr = @{ Authorization = "Bearer $Pat" }
-    $ApiBase = "https://api.github.com/repos/$Owner/$Repo"
+    $PatSnip = if ($Pat.Length -ge 8) { $Pat.Substring(0,8) + "..." } else { "(short)" }
 
     Clear-Host
     Write-Host "=== EMBED MODULE CONFIG (.TOOLKIT_CONFIG) ===" -ForegroundColor Yellow
-    Write-Host "  Writes a .TOOLKIT_CONFIG JSON block into a module's Entry.ps1." -ForegroundColor DarkGray
-    Write-Host "  Repo: $Owner/$Repo @ $Branch`n" -ForegroundColor DarkGray
+    Write-Host "  Writes a .TOOLKIT_CONFIG JSON block into a module's Entry.ps1.`n" -ForegroundColor DarkGray
+
+    # Let admin confirm / correct the repo coordinates before the API call
+    Write-Host "  Confirm repo settings (Enter to accept each):" -ForegroundColor Yellow
+    $v = (Read-Host "  Owner  [$Owner]").Trim();  if ($v) { $Owner  = $v }
+    $v = (Read-Host "  Repo   [$Repo]").Trim();   if ($v) { $Repo   = $v }
+    $v = (Read-Host "  Branch [$Branch]").Trim(); if ($v) { $Branch = $v }
+    Write-Host "  PAT    : $PatSnip" -ForegroundColor DarkGray
+
+    $AuthHdr = @{ Authorization = "Bearer $Pat" }
+    $ApiBase = "https://api.github.com/repos/$Owner/$Repo"
+    $ListUrl = "$ApiBase/contents?ref=$Branch"
+    Write-Host "  URL    : $ListUrl`n" -ForegroundColor DarkGray
 
     # Fetch module list
     try {
-        $Items = Invoke-RestMethod -Uri "$ApiBase/contents?ref=$Branch" -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
+        $Items = Invoke-RestMethod -Uri $ListUrl -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
         $Dirs  = @($Items | Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } | Sort-Object name)
     } catch {
         Write-Host "[!] Could not fetch module list: $($_.Exception.Message)" -ForegroundColor Red
-        Read-Host "Press [Enter] to return"; return
+        Write-Host "  Common causes:" -ForegroundColor DarkGray
+        Write-Host "    - Repo name or owner is wrong (check above URL)" -ForegroundColor DarkGray
+        Write-Host "    - PAT lacks 'repo' scope for private repos" -ForegroundColor DarkGray
+        Write-Host "    - Branch does not exist (try 'master' if 'main' fails)" -ForegroundColor DarkGray
+        Write-Host "    - PAT was revoked — re-enroll via Option 2 with a fresh token" -ForegroundColor DarkGray
+        Read-Host "`n  Press [Enter] to return"; return
     }
 
     if ($Dirs.Count -eq 0) {
