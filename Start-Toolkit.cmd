@@ -456,6 +456,12 @@ function Invoke-PATDiagnostic {
 }
 
 function Invoke-ModuleConfigEditor {
+    try { _Invoke-ModuleConfigEditor } catch {
+        Write-Host "`n[!] Error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "  Press [Enter] to return"
+    }
+}
+function _Invoke-ModuleConfigEditor {
     # Use active session PAT, or authenticate inline
     $Pat = $global:ToolkitPAT
     if (-not $Pat) {
@@ -640,7 +646,7 @@ function Invoke-ModuleConfigEditor {
     }
 
     Read-Host "`n  Press [Enter] to return"
-}
+}  # end _Invoke-ModuleConfigEditor
 
 function Test-DebugWindowAlive {
     $pf = Join-Path $env:ProgramData "CassenaCareToolkit\toolkit_debug_active.pid"
