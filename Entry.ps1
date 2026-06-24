@@ -26,6 +26,7 @@ if ($global:ToolkitBranch)     { $Branch     = $global:ToolkitBranch     }
 $AllowedTags = if ($global:ToolkitAllowedTags -and $global:ToolkitAllowedTags.Count -gt 0) {
     @($global:ToolkitAllowedTags)
 } else { $null }
+if ($global:ToolkitGodMode) { $AllowedTags = $null }
 
 function Write-Log { param($Level,$Message)
     if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
@@ -245,7 +246,8 @@ try {
 
         # ── Header bar ─────────────────────────────────────────────
         $AuthTag     = if ($AuthHeader) { "Auth: Active" } else { "Auth: Anonymous" }
-        $HeaderLabel = New-Object Terminal.Gui.Label("  CASSENA CARE IR TOOLKIT  |  Operator: $($env:USERNAME)  |  $AuthTag  |  [Shift+Boot] → Admin  ")
+        $GodTag      = if ($global:ToolkitGodMode) { "  ★ GOD MODE ★  |" } else { "" }
+        $HeaderLabel = New-Object Terminal.Gui.Label("$GodTag  CASSENA CARE IR TOOLKIT  |  Operator: $($env:USERNAME)  |  $AuthTag  |  [Shift+Boot] → Admin  ")
         $HeaderLabel.X           = 0
         $HeaderLabel.Y           = 0
         $HeaderLabel.Width       = [Terminal.Gui.Dim]::Fill()

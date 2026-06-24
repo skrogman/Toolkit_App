@@ -144,11 +144,13 @@ function New-UserTokenConfig {
     } else { "(none yet)" }
     Write-Host "  Available roles: $existingRoles" -ForegroundColor DarkGray
     $AssignedRole = (Read-Host "Assign role for '$Username' (blank = use DefaultRole)").Trim()
+    $GodModeInput = (Read-Host "Enable God Mode for '$Username'? Bypasses all tag filters — sees every module [y/N]").Trim().ToLower()
+    $GodMode      = ($GodModeInput -eq 'y')
 
     if (-not $CurrentConfig.Users) {
         $CurrentConfig | Add-Member -NotePropertyName Users -NotePropertyValue ([PSCustomObject]@{}) -Force
     }
-    $userEntry = [PSCustomObject]@{ token = $tokenStr; role = $AssignedRole }
+    $userEntry = [PSCustomObject]@{ token = $tokenStr; role = $AssignedRole; godMode = $GodMode }
     if ($CurrentConfig.Users.PSObject.Properties[$Username]) {
         $CurrentConfig.Users.$Username = $userEntry
     } else {
@@ -177,8 +179,9 @@ function Get-DecodedToken($Config) {
     Write-Host ""
 
     $userObj  = $Config.Users.$Username
-    $tokenStr = if ($userObj -is [string]) { $userObj } else { $userObj.token }
-    $roleStr  = if ($userObj -is [string]) { $null    } else { $userObj.role  }
+    $tokenStr = if ($userObj -is [string]) { $userObj } else { $userObj.token   }
+    $roleStr  = if ($userObj -is [string]) { $null    } else { $userObj.role    }
+    $godMode  = if ($userObj -is [string]) { $false   } else { [bool]$userObj.godMode }
 
     $parts = $tokenStr -split '\|'
     if ($parts[0] -ne 'v2') {
@@ -204,7 +207,7 @@ function Get-DecodedToken($Config) {
         throw "Incorrect PIN for profile '$Username'."
     }
 
-    return @{ PAT = $pat; Role = $roleStr }
+    return @{ PAT = $pat; Role = $roleStr; GodMode = $godMode }
 }
 
 function Invoke-RoleManager {
@@ -227,13 +230,14 @@ function Invoke-RoleManager {
         }
 
         Write-Host ""
-        Write-Host "  a) Create / edit role" -ForegroundColor Cyan
-        Write-Host "  b) Delete role"        -ForegroundColor Cyan
-        Write-Host "  c) Set default role"   -ForegroundColor Cyan
-        Write-Host "  e) Back"               -ForegroundColor Gray
+        Write-Host "  a) Create / edit role"          -ForegroundColor Cyan
+        Write-Host "  b) Delete role"                 -ForegroundColor Cyan
+        Write-Host "  c) Set default role"            -ForegroundColor Cyan
+        Write-Host "  d) Toggle God Mode for a user"  -ForegroundColor Yellow
+        Write-Host "  e) Back"                        -ForegroundColor Gray
         Write-Host ""
 
-        $RChoice = (Read-Host "  Select [a/b/c/e]").Trim().ToLower()
+        $RChoice = (Read-Host "  Select [a/b/c/d/e]").Trim().ToLower()
 
         switch ($RChoice) {
             "a" {
@@ -292,6 +296,26 @@ function Invoke-RoleManager {
                 }
                 $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
                 Write-Host "  [+] DefaultRole set to '$RoleName'." -ForegroundColor Green
+                Start-Sleep 1
+            }
+            "d" {
+                $TargetUser = (Read-Host "  Username to toggle God Mode").Trim()
+                if ([string]::IsNullOrEmpty($TargetUser)) { break }
+                $CfgW = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+                if (-not $CfgW.Users.PSObject.Properties[$TargetUser]) {
+                    Write-Host "  [!] User '$TargetUser' not found." -ForegroundColor Red; Start-Sleep 1; break
+                }
+                $currentGM = [bool]$CfgW.Users.$TargetUser.godMode
+                $newGM     = -not $currentGM
+                if ($CfgW.Users.$TargetUser.PSObject.Properties['godMode']) {
+                    $CfgW.Users.$TargetUser.godMode = $newGM
+                } else {
+                    $CfgW.Users.$TargetUser | Add-Member -NotePropertyName godMode -NotePropertyValue $newGM -Force
+                }
+                $CfgW | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigFile -Encoding utf8
+                $status = if ($newGM) { "ENABLED" } else { "DISABLED" }
+                $color  = if ($newGM) { "Yellow"  } else { "Green"    }
+                Write-Host "  [+] God Mode $status for '$TargetUser'." -ForegroundColor $color
                 Start-Sleep 1
             }
             "e" { return }
@@ -411,14 +435,16 @@ function Show-ConfigMenu {
                     $Data = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
                     Write-Host "`nConfigured Profiles:" -ForegroundColor Yellow
                     $Data.Users.PSObject.Properties | ForEach-Object {
+                        $gmTag   = if ($_.Value.godMode) { " ★ GOD MODE" } else { "" }
                         $roleTag = if ($_.Value -is [string]) {
                             " [legacy token — re-enroll via Option 2]"
                         } elseif ($_.Value.role) {
-                            " [role: $($_.Value.role)]"
+                            " [role: $($_.Value.role)]$gmTag"
                         } else {
-                            " [role: (DefaultRole)]"
+                            " [role: (DefaultRole)]$gmTag"
                         }
-                        Write-Host " -> $($_.Name)$roleTag" -ForegroundColor Gray
+                        $color = if ($_.Value.godMode) { "Yellow" } else { "Gray" }
+                        Write-Host " -> $($_.Name)$roleTag" -ForegroundColor $color
                     }
                 } else { Write-Host "[!] No configuration file detected yet." -ForegroundColor Red }
                 Read-Host "`nPress [Enter] to return to menu"
@@ -476,15 +502,17 @@ function Show-ConfigMenu {
                     $global:ToolkitTargetRepo  = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
                     $global:ToolkitBranch      = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
                     $global:ToolkitDebugMode   = (Test-DebugWindowAlive)
-                    $global:ToolkitAllowedTags = if ($RoleDef) { @($RoleDef.tags) } else { @() }
+                    $global:ToolkitAllowedTags = if ($AuthResult.GodMode) { $null } elseif ($RoleDef) { @($RoleDef.tags) } else { @() }
+                    $global:ToolkitGodMode     = $AuthResult.GodMode
                     $global:ToolkitUsername    = $script:LastAuthedUsername
                     $global:ToolkitRole        = $UserRole
 
                     if (Get-Command Write-DebugWindow -EA SilentlyContinue) {
                         $Snip = if ($Token.Length -ge 10) { $Token.Substring(0,10) + "..." } else { "(empty)" }
                         Write-DebugWindow "=== AUTHENTICATION ===" -Level INFO
-                        Write-DebugWindow "User   : $($global:ToolkitUsername) [role: $UserRole]" -Level INFO
-                        Write-DebugWindow "Tags   : $($global:ToolkitAllowedTags -join ', ')" -Level INFO
+                        $gmSuffix = if ($AuthResult.GodMode) { " | GOD MODE ACTIVE" } else { "" }
+                        Write-DebugWindow "User   : $($global:ToolkitUsername) [role: $UserRole$gmSuffix]" -Level INFO
+                        Write-DebugWindow "Tags   : $(if ($global:ToolkitAllowedTags) { $global:ToolkitAllowedTags -join ', ' } else { '* (unrestricted)' })" -Level INFO
                         Write-DebugWindow "Target : $($global:ToolkitRepoOwner)/$($global:ToolkitTargetRepo) [$($global:ToolkitBranch)]" -Level INFO
                         Write-DebugWindow "Token  : $Snip" -Level INFO
                         Write-DebugWindow "Testing GitHub API connectivity..." -Level INFO
@@ -565,7 +593,8 @@ try {
         $global:ToolkitRepoOwner   = if ($Config.Settings.PublicOwner)  { $Config.Settings.PublicOwner  } else { "skrogman" }
         $global:ToolkitTargetRepo  = if ($Config.Settings.PublicRepo)   { $Config.Settings.PublicRepo   } else { "Toolkit_Modules" }
         $global:ToolkitBranch      = if ($Config.Settings.PublicBranch) { $Config.Settings.PublicBranch } else { "main" }
-        $global:ToolkitAllowedTags = if ($RoleDef) { @($RoleDef.tags) } else { @() }
+        $global:ToolkitAllowedTags = if ($AuthResult.GodMode) { $null } elseif ($RoleDef) { @($RoleDef.tags) } else { @() }
+        $global:ToolkitGodMode     = $AuthResult.GodMode
         $global:ToolkitUsername    = $script:LastAuthedUsername
         $global:ToolkitRole        = $UserRole
     }
