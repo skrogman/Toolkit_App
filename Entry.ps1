@@ -483,7 +483,7 @@ try {
 
             $CacheBuster    = [guid]::NewGuid().ToString()
             $FetchUrl       = "https://raw.githubusercontent.com/$RepoOwner/$TargetRepo/$Branch/$($global:TargetModule)/Entry.ps1?t=$CacheBuster"
-            $transcriptFile = Join-Path $env:TEMP "toolkit_module_run.log"
+            $transcriptFile = Join-Path $env:TEMP "toolkit_module_run_$($CacheBuster.Replace('-','')).log"
 
             try {
                 $FetchParams = @{ Uri = $FetchUrl; UseBasicParsing = $true; ErrorAction = "Stop" }
