@@ -324,6 +324,75 @@ function Invoke-RoleManager {
 }
 
 
+function Invoke-PATDiagnostic {
+    if (-not (Test-Path $ConfigFile)) {
+        Write-Host "[!] No config file found at $ConfigFile" -ForegroundColor Red
+        Read-Host "Press [Enter] to return"; return
+    }
+    $Cfg = Get-Content -Path $ConfigFile -Raw | ConvertFrom-Json
+
+    Clear-Host
+    Write-Host "=== PAT DIAGNOSTIC ===" -ForegroundColor Yellow
+    Write-Host "  Step 1: Decrypt stored PAT" -ForegroundColor DarkGray
+    Write-Host "  Step 2: Test PAT validity against GitHub (/user)" -ForegroundColor DarkGray
+    Write-Host "  Step 3: Test access to Toolkit_Modules repo" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # Step 1 — decrypt
+    $Pat = $null
+    try {
+        $AuthResult = Get-DecodedToken -Config $Cfg
+        $Pat = $AuthResult.PAT
+        $Prefix = if ($Pat.Length -ge 16) { $Pat.Substring(0,12) + "..." + $Pat.Substring($Pat.Length-4) } else { "(short)" }
+        Write-Host "  [1] PASS — Decryption succeeded" -ForegroundColor Green
+        Write-Host "        PAT  : $Prefix" -ForegroundColor DarkGray
+        Write-Host "        Role : $($AuthResult.Role)" -ForegroundColor DarkGray
+        Write-Host "        GM   : $($AuthResult.GodMode)" -ForegroundColor DarkGray
+    } catch {
+        Write-Host "  [1] FAIL — $($_.Exception.Message)" -ForegroundColor Red
+        Read-Host "`n  Press [Enter] to return"; return
+    }
+
+    $AuthHdr = @{ Authorization = "Bearer $Pat"; 'User-Agent' = 'ToolkitDiag/1.0' }
+
+    # Step 2 — test PAT against /user
+    Write-Host ""
+    try {
+        $GhUser = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
+        Write-Host "  [2] PASS — PAT is valid. GitHub login: $($GhUser.login)" -ForegroundColor Green
+    } catch {
+        $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { "?" }
+        Write-Host "  [2] FAIL $code — PAT is invalid or revoked: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "        >> Generate a new PAT and re-enroll via Option 2." -ForegroundColor Yellow
+        Read-Host "`n  Press [Enter] to return"; return
+    }
+
+    # Step 3 — test Toolkit_Modules access
+    $Owner  = if ($Cfg.Settings.PublicOwner)  { $Cfg.Settings.PublicOwner  } else { "skrogman" }
+    $Repo   = if ($Cfg.Settings.PublicRepo)   { $Cfg.Settings.PublicRepo   } else { "Toolkit_Modules" }
+    $Branch = if ($Cfg.Settings.PublicBranch) { $Cfg.Settings.PublicBranch } else { "main" }
+    Write-Host ""
+    try {
+        $Contents = Invoke-RestMethod -Uri "https://api.github.com/repos/$Owner/$Repo/contents?ref=$Branch" -Headers $AuthHdr -UseBasicParsing -ErrorAction Stop
+        $DirCount = @($Contents | Where-Object { $_.type -eq 'dir' }).Count
+        Write-Host "  [3] PASS — Repo accessible. Found $DirCount director(ies) in $Owner/$Repo @ $Branch." -ForegroundColor Green
+    } catch {
+        $code = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { "?" }
+        Write-Host "  [3] FAIL $code — Cannot access $Owner/$Repo @ $Branch" -ForegroundColor Red
+        if ($code -eq 404) {
+            Write-Host "        >> 404: Either the repo is private and PAT lacks 'repo' scope," -ForegroundColor Yellow
+            Write-Host "        >>       or the repo '$Repo' does not exist under '$Owner'." -ForegroundColor Yellow
+            Write-Host "        >>       Classic PAT: check 'repo' scope (not just 'public_repo')." -ForegroundColor Yellow
+            Write-Host "        >>       Fine-grained PAT: add '$Repo' with Contents=Read." -ForegroundColor Yellow
+        } elseif ($code -eq 401) {
+            Write-Host "        >> 401: Token rejected. Re-enroll with a valid PAT." -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host ""
+    Read-Host "  Press [Enter] to return"
+}
+
 function Invoke-ModuleConfigEditor {
     # Use active session PAT, or authenticate inline
     $Pat = $global:ToolkitPAT
@@ -577,9 +646,10 @@ function Show-ConfigMenu {
         Write-Host "  7) Authenticate & Launch Toolkit" -ForegroundColor Green
         Write-Host "  8) Manage Roles" -ForegroundColor Cyan
         Write-Host "  9) Embed Module Config (.TOOLKIT_CONFIG tags/metadata)" -ForegroundColor Cyan
+        Write-Host "  0) Diagnose PAT / GitHub Connectivity" -ForegroundColor DarkYellow
         Write-Host "=====================================================================" -ForegroundColor Yellow
 
-        $MenuChoice = Read-Host "Select an administration option [1-9]"
+        $MenuChoice = Read-Host "Select an administration option [0-9]"
 
         switch ($MenuChoice.Trim()) {
             "1" {
@@ -711,6 +781,7 @@ function Show-ConfigMenu {
             }
             "8" { Invoke-RoleManager }
             "9" { Invoke-ModuleConfigEditor }
+            "0" { Invoke-PATDiagnostic }
         }
     }
 }
