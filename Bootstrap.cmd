@@ -16,52 +16,27 @@ goto:eof
 
 # ==================================================================
 # BOOTSTRAP: Operator Launcher
-# Reads config from Start-Toolkit.cmd, authenticates, launches TUI.
+# Reads own embedded config, authenticates, launches TUI.
 # No admin panel. No debug. Straight to toolkit.
 # ==================================================================
-$ErrorActionPreference = "Stop"
-$ScriptDir = if ($PSScriptRoot -and $PSScriptRoot -ne '') { $PSScriptRoot }
-             elseif ($env:TK_SELF) { Split-Path -Parent $env:TK_SELF }
-             else { $PWD.Path }
-$global:BootstrapSelfPath = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
-                             elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
-                             else { $null }
 
-# --- ENGINE HANDOFF: PS 5.1 -> PS7 ---
+# --- ENGINE HANDOFF: PS 5.1 -> PS7 (must run before try block) ---
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host "`n[!] PowerShell 7 required. Handing off to pwsh..." -ForegroundColor Cyan
     $TargetScript = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
                     elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
                     else { $null }
-    if (-not $TargetScript) { Write-Host "[!] Cannot locate Bootstrap file path." -ForegroundColor Red; Read-Host; exit }
+    if (-not $TargetScript) { Write-Host "[!] Cannot locate Bootstrap file path." -ForegroundColor Red; Read-Host "Press [Enter] to exit"; exit 1 }
     if (Get-Command pwsh -ErrorAction SilentlyContinue) {
-        $Proc = Start-Process pwsh.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$TargetScript`"" -PassThru -Wait -NoNewWindow
+        $Proc = Start-Process pwsh.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"`$f=[System.IO.File]::ReadAllText('$($TargetScript -replace "'","''")'); Invoke-Expression `$f`"" -PassThru -Wait -NoNewWindow
         exit $Proc.ExitCode
     } else {
         Write-Host "[!] FATAL: PowerShell 7 (pwsh) is not installed." -ForegroundColor Red
-        Read-Host "Press [Enter] to exit"; exit
+        Read-Host "Press [Enter] to exit"; exit 1
     }
 }
 
-# --- SINGLE-INSTANCE LOCK ---
-$MutexName  = "Global\SkrogmanIRToolkitEnclaveLock"
-$CreatedNew = $false
-$Mutex      = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
-if (-not $CreatedNew) {
-    Write-Host "`n[!] Another Toolkit instance is already running." -ForegroundColor Yellow
-    $c = (Read-Host "  [Y] Allow multi-instance  /  [Enter] Take over").Trim().ToUpper()
-    if ($c -eq 'Y') {
-        $Mutex.Dispose(); $Mutex = $null
-    } else {
-        $pid = $PID
-        Get-CimInstance Win32_Process -Filter "Name like 'pwsh%.exe' or Name like 'powershell%.exe'" |
-            Where-Object { $_.ProcessId -ne $pid -and $_.CommandLine -match 'Bootstrap|Start-Toolkit' } |
-            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
-        Start-Sleep -Milliseconds 600
-        $Mutex.Dispose()
-        $Mutex = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
-    }
-}
+$Mutex = $null
 
 # --- READ OWN EMBEDDED CONFIG ---
 function Read-ToolkitConfig {
@@ -128,6 +103,32 @@ function Get-DecodedToken($Config) {
 
 # --- LAUNCH ---
 try {
+    $ErrorActionPreference = "Stop"
+
+    $global:BootstrapSelfPath = if ($env:TK_SELF -and (Test-Path $env:TK_SELF)) { $env:TK_SELF }
+                                 elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path }
+                                 else { $null }
+
+    # Single-instance mutex
+    $MutexName  = "Global\SkrogmanIRToolkitEnclaveLock"
+    $CreatedNew = $false
+    $Mutex      = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
+    if (-not $CreatedNew) {
+        Write-Host "`n[!] Another Toolkit instance is already running." -ForegroundColor Yellow
+        $c = (Read-Host "  [Y] Allow multi-instance  /  [Enter] Take over").Trim().ToUpper()
+        if ($c -eq 'Y') {
+            $Mutex.Dispose(); $Mutex = $null
+        } else {
+            $thisPid = $PID
+            Get-CimInstance Win32_Process -Filter "Name like 'pwsh%.exe' or Name like 'powershell%.exe'" |
+                Where-Object { $_.ProcessId -ne $thisPid -and $_.CommandLine -match 'Bootstrap|Start-Toolkit' } |
+                ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }
+            Start-Sleep -Milliseconds 600
+            $Mutex.Dispose()
+            $Mutex = [System.Threading.Mutex]::new($true, $MutexName, [ref]$CreatedNew)
+        }
+    }
+
     $Config = Read-ToolkitConfig
     if (-not $Config) {
         throw "No configuration embedded in this Bootstrap. Use Start-Toolkit.cmd Option P to publish config here."
@@ -162,9 +163,9 @@ try {
 
 } catch {
     Write-Host "`n[!] $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Press [Enter] to exit"
+    Read-Host "`nPress [Enter] to exit"
 } finally {
-    if ($Mutex) { $Mutex.ReleaseMutex(); $Mutex.Dispose() }
+    if ($Mutex) { try { $Mutex.ReleaseMutex() } catch {} ; $Mutex.Dispose() }
 }
 
 # ===TOOLKIT_CONFIG_BEGIN===
