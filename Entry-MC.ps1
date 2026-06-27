@@ -285,24 +285,31 @@ try {
     $global:TargetModeModes = @("interactive")
     $global:TargetModeDefault = "interactive"
     $global:TargetExec      = $null          # file item hashtable → execute specific file
-    $global:NavDepth        = 0              # 0=root module list, 1=inside a folder module
-    $global:NavFolder       = $null          # the IsFolder module we drilled into
-    $global:NavItems        = [System.Collections.Generic.List[hashtable]]::new()  # depth-1 file items
+    $global:NavPath         = ""             # "" = root module list; else current browse path
+    $global:NavItems        = [System.Collections.Generic.List[hashtable]]::new()  # items at current path
     $global:SelectedIndex   = 0
     $global:LastModuleRun   = $null
     $global:LastModuleOutput = $null
 
-    function Build-NavItemsForFolder {
-        param([hashtable]$FolderMod)
-        $items    = [System.Collections.Generic.List[hashtable]]::new()
-        $children = Get-DirListing $FolderMod.Name
-        $files    = @($children | Where-Object { $_.type -eq 'file' } | Sort-Object name)
-        $entryF   = $files | Where-Object { $_.name -eq 'Entry.ps1' } | Select-Object -First 1
-        $otherF   = @($files | Where-Object { $_.name -ne 'Entry.ps1' })
-
+    function Get-NavItems {
+        param([string]$Path)
+        $result   = [System.Collections.Generic.List[hashtable]]::new()
+        $children = Get-DirListing $Path
+        # Parent entry: Path stores where [↑] navigates to
+        $parentPath = if ($Path -match '/') { $Path -replace '/[^/]+$','' } else { "" }
+        $result.Add(@{ Type='parent'; Name='..'; Label="  [↑] .."; DownloadUrl=$null; Extension=''; Size=0; Path=$parentPath })
+        # Subdirs first
+        $dirs   = @($children | Where-Object { $_.type -eq 'dir'  -and $_.name -notmatch '^\.' } | Sort-Object name)
+        $files  = @($children | Where-Object { $_.type -eq 'file' } | Sort-Object name)
+        $entryF = $files | Where-Object { $_.name -eq 'Entry.ps1' } | Select-Object -First 1
+        $otherF = @($files | Where-Object { $_.name -ne 'Entry.ps1' })
+        foreach ($d in $dirs) {
+            $childPath = if ($Path -eq "") { $d.name } else { "$Path/$($d.name)" }
+            $result.Add(@{ Type='dir'; Name=$d.name; Label="  [/] $($d.name)/"; DownloadUrl=$null; Extension=''; Size=0; Path=$childPath })
+        }
         if ($entryF) {
-            $items.Add(@{ Type='entry'; Name='Entry.ps1'; Label="  [►] Entry.ps1";
-                          DownloadUrl=$entryF.download_url; Extension='ps1'; Size=$entryF.size; Path=$FolderMod.Name })
+            $result.Add(@{ Type='entry'; Name='Entry.ps1'; Label="  [►] Entry.ps1";
+                           DownloadUrl=$entryF.download_url; Extension='ps1'; Size=$entryF.size; Path=$Path })
         }
         foreach ($f in $otherF) {
             $ext  = if ($f.name -match '\.([^.]+)$') { $Matches[1].ToLower() } else { '' }
@@ -311,17 +318,17 @@ try {
                 'exe'  { '[E]' }; 'msi'  { '[I]' }; default { '[?]' }
             }
             $isBin = $ext -in @('exe','msi','dll','bin')
-            $items.Add(@{
+            $result.Add(@{
                 Type        = if ($isBin) { 'executable' } else { 'file' }
                 Name        = $f.name
                 Label       = "  $icon $($f.name)"
                 DownloadUrl = $f.download_url
                 Extension   = $ext
                 Size        = $f.size
-                Path        = $FolderMod.Name
+                Path        = $Path
             })
         }
-        return $items
+        return $result
     }
 
     # ----------------------------------------------------------------
@@ -364,7 +371,7 @@ try {
         $GodTag  = if ($global:ToolkitGodMode) { "  ★ GOD MODE ★  |" } else { "" }
         $AuthTag = if ($AuthHeader) { "Auth:Active" } else { "Auth:Anon" }
         $ElevTag = if ($IsElevated) { "  ★ ADMIN" } else { "" }
-        $PathDisp = if ($global:NavDepth -eq 1 -and $global:NavFolder) { "/$($global:NavFolder.Name)" } else { "/[root]" }
+        $PathDisp = if ($global:NavPath -ne "") { "/$($global:NavPath)" } else { "/[root]" }
         $global:HeaderLabel = New-Object Terminal.Gui.Label("$GodTag  CASSENA CARE TOOLKIT  |  $PathDisp  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  ")
         $global:HeaderLabel.X           = 0
         $global:HeaderLabel.Y           = 0
@@ -373,11 +380,7 @@ try {
         $Win.Add($global:HeaderLabel)
 
         # ── Left pane ──────────────────────────────────────────────────
-        $LeftTitle = if ($global:NavDepth -eq 1 -and $global:NavFolder) {
-            "  $($global:NavFolder.DisplayName)/  "
-        } else {
-            "  MODULES  "
-        }
+        $LeftTitle = if ($global:NavPath -ne "") { "  /$($global:NavPath)/  " } else { "  MODULES  " }
         $ListFrame = New-Object Terminal.Gui.FrameView($LeftTitle)
         $ListFrame.X           = 0
         $ListFrame.Y           = 2
@@ -388,10 +391,11 @@ try {
 
         # Rebuild MenuLabels for current navigation state
         $global:MenuLabels = [System.Collections.ArrayList]@()
-        if ($global:NavDepth -eq 1) {
-            [void]$global:MenuLabels.Add("  [↑] ..")
+        if ($global:NavPath -ne "") {
+            $global:NavItems = Get-NavItems $global:NavPath
             foreach ($ni in $global:NavItems) { [void]$global:MenuLabels.Add($ni.Label) }
         } else {
+            $global:NavItems = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($m in $global:Modules) {
                 $prefix = if ($m.ElevLocked) { "  [ADMIN] " } elseif ($m.IsFolder) { "  [/] " } else { "  " }
                 $suffix = if ($m.IsFolder) { "/" } else { "" }
@@ -436,16 +440,25 @@ try {
         $global:BuildInfoPane = {
             param($Index)
 
-            # ── DEPTH 1: inside a folder module ─────────────────────────
-            if ($global:NavDepth -eq 1) {
-                if ($Index -eq 0) {
-                    $t  = "`n  [↑] BACK TO MODULES`n"
-                    $t += "  ══════════════════════════════`n`n"
-                    $t += "  Return to: $RepoOwner/$TargetRepo`n`n"
-                    $t += "  Press [Enter] to go back."
-                } elseif ($Index -le $global:NavItems.Count) {
-                    $item = $global:NavItems[$Index - 1]
-                    if ($item.Type -eq 'executable') {
+            # ── Inside a path (folder browser) ──────────────────────────
+            if ($global:NavPath -ne "") {
+                if ($Index -lt 0 -or $Index -ge $global:NavItems.Count) {
+                    $t = "`n  (select an item)"
+                } else {
+                    $item = $global:NavItems[$Index]
+                    if ($item.Type -eq 'parent') {
+                        $dest = if ($item.Path -eq "") { "module list" } else { "/$($item.Path)" }
+                        $t  = "`n  [↑] BACK`n"
+                        $t += "  ══════════════════════════════`n`n"
+                        $t += "  Return to: $dest`n`n"
+                        $t += "  Press [Enter] to go back."
+                    } elseif ($item.Type -eq 'dir') {
+                        $t  = "`n  [/] $($item.Name.ToUpper())/`n"
+                        $t += "  ══════════════════════════════`n`n"
+                        $t += "  Subfolder`n"
+                        $t += "  Path: /$($item.Path)/`n`n"
+                        $t += "  Press [Enter] to open."
+                    } elseif ($item.Type -eq 'executable') {
                         $t  = "`n  $($item.Name.ToUpper())`n"
                         $t += "  ══════════════════════════════`n`n"
                         $t += "  Executable / binary file`n"
@@ -453,8 +466,7 @@ try {
                         $t += "  Type  : .$($item.Extension)`n"
                         $t += "  Size  : $($item.Size) bytes`n"
                         $t += "  Path  : /$($item.Path)/$($item.Name)`n`n"
-                        $t += "  [!] Executable launch support`n"
-                        $t += "  not yet implemented."
+                        $t += "  [!] Binary launch not supported."
                     } elseif ($item.Type -eq 'entry') {
                         $content = Get-FileContent $item.DownloadUrl
                         $desc    = Get-FileDescription $content 'ps1'
@@ -480,8 +492,6 @@ try {
                         $t += "  Path  : /$($item.Path)/$($item.Name)`n`n"
                         $t += "  Press [Enter] to execute."
                     }
-                } else {
-                    $t = "`n  (select an item)"
                 }
                 $global:InfoView.Text = $t
                 $global:InfoView.SetNeedsDisplay()
@@ -582,7 +592,7 @@ try {
             $global:SelectedIndex = $e.Item
 
             # At root: lazy-load module metadata on first hover
-            if ($global:NavDepth -eq 0 -and $e.Item -lt $global:Modules.Count) {
+            if ($global:NavPath -eq "" -and $e.Item -lt $global:Modules.Count) {
                 $m = $global:Modules[$e.Item]
                 if (-not $m.Loaded -and -not $m.IsFolder) {
                     Invoke-LazyLoad $m
@@ -601,36 +611,56 @@ try {
             param($e)
             $idx = $e.Item
 
-            # ── Inside a folder ────────────────────────────────────────
-            if ($global:NavDepth -eq 1) {
-                if ($idx -eq 0) {
-                    # Navigate back to root
-                    $global:NavDepth  = 0
-                    $global:NavFolder = $null
-                    $global:NavItems  = [System.Collections.Generic.List[hashtable]]::new()
+            # ── Inside a path (folder browser) ────────────────────────
+            if ($global:NavPath -ne "") {
+                if ($idx -ge $global:NavItems.Count) { return }
+                $item = $global:NavItems[$idx]
+
+                if ($item.Type -eq 'parent') {
+                    # Navigate up
+                    $global:NavPath = $item.Path   # "" = back to module root
 
                     $global:MenuLabels.Clear()
-                    foreach ($m in $global:Modules) {
-                        $prefix = if ($m.ElevLocked) { "  [ADMIN] " } elseif ($m.IsFolder) { "  [/] " } else { "  " }
-                        $suffix = if ($m.IsFolder) { "/" } else { "" }
-                        [void]$global:MenuLabels.Add("$prefix$($m.DisplayName)$suffix")
+                    if ($global:NavPath -eq "") {
+                        $global:NavItems = [System.Collections.Generic.List[hashtable]]::new()
+                        foreach ($m in $global:Modules) {
+                            $prefix = if ($m.ElevLocked) { "  [ADMIN] " } elseif ($m.IsFolder) { "  [/] " } else { "  " }
+                            $suffix = if ($m.IsFolder) { "/" } else { "" }
+                            [void]$global:MenuLabels.Add("$prefix$($m.DisplayName)$suffix")
+                        }
+                        [void]$global:MenuLabels.Add("  ─── Exit Toolkit ───")
+                        $ListFrame.Title = "  MODULES  "
+                    } else {
+                        $global:NavItems = Get-NavItems $global:NavPath
+                        foreach ($ni in $global:NavItems) { [void]$global:MenuLabels.Add($ni.Label) }
+                        $ListFrame.Title = "  /$($global:NavPath)/  "
                     }
-                    [void]$global:MenuLabels.Add("  ─── Exit Toolkit ───")
                     $ListView.SetSource($global:MenuLabels)
-                    $ListFrame.Title = "  MODULES  "
-                    $global:HeaderLabel.Text = "$GodTag  CASSENA CARE TOOLKIT  |  /[root]  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  "
+                    $global:HeaderLabel.Text = "$GodTag  CASSENA CARE TOOLKIT  |  $(if ($global:NavPath -ne '') { "/$($global:NavPath)" } else { '/[root]' })  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  "
                     $global:HeaderLabel.SetNeedsDisplay()
                     $ListView.SelectedItem = 0
                     $global:SelectedIndex = 0
                     & $global:BuildInfoPane -Index 0
-                } elseif ($idx -le $global:NavItems.Count) {
-                    $item = $global:NavItems[$idx - 1]
-                    if ($item.Type -in @('entry','file')) {
-                        $global:TargetExec = $item
-                        [Terminal.Gui.Application]::RequestStop()
-                    }
-                    # 'executable' type: show info only (no launch)
+
+                } elseif ($item.Type -eq 'dir') {
+                    # Drill into subfolder
+                    $global:NavPath  = $item.Path
+                    $global:NavItems = Get-NavItems $global:NavPath
+                    $global:MenuLabels.Clear()
+                    foreach ($ni in $global:NavItems) { [void]$global:MenuLabels.Add($ni.Label) }
+                    $ListView.SetSource($global:MenuLabels)
+                    $ListFrame.Title = "  /$($global:NavPath)/  "
+                    $global:HeaderLabel.Text = "$GodTag  CASSENA CARE TOOLKIT  |  /$($global:NavPath)  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  "
+                    $global:HeaderLabel.SetNeedsDisplay()
+                    $ListView.SelectedItem = 0
+                    $global:SelectedIndex = 0
+                    & $global:BuildInfoPane -Index 0
+
+                } elseif ($item.Type -in @('entry','file')) {
+                    $global:TargetExec = $item
+                    [Terminal.Gui.Application]::RequestStop()
                 }
+                # 'executable': no launch
                 return
             }
 
@@ -646,16 +676,13 @@ try {
 
             if ($mod.IsFolder) {
                 # Drill into multi-file folder
-                $global:NavItems  = Build-NavItemsForFolder $mod
-                $global:NavDepth  = 1
-                $global:NavFolder = $mod
-
+                $global:NavPath  = $mod.Name
+                $global:NavItems = Get-NavItems $global:NavPath
                 $global:MenuLabels.Clear()
-                [void]$global:MenuLabels.Add("  [↑] ..")
                 foreach ($ni in $global:NavItems) { [void]$global:MenuLabels.Add($ni.Label) }
                 $ListView.SetSource($global:MenuLabels)
-                $ListFrame.Title = "  $($mod.DisplayName)/  "
-                $global:HeaderLabel.Text = "$GodTag  CASSENA CARE TOOLKIT  |  /$($mod.Name)  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  "
+                $ListFrame.Title = "  /$($global:NavPath)/  "
+                $global:HeaderLabel.Text = "$GodTag  CASSENA CARE TOOLKIT  |  /$($global:NavPath)  |  $AuthTag$ElevTag  |  Operator: $($env:USERNAME)  "
                 $global:HeaderLabel.SetNeedsDisplay()
                 $ListView.SelectedItem = 0
                 $global:SelectedIndex = 0
@@ -671,9 +698,9 @@ try {
         [void]$ListView.add_OpenSelectedItem($OnItemOpened)
 
         # ── Nav hint ────────────────────────────────────────────────────
-        $hintDepth0 = "  ↑↓ Navigate   Enter: Launch/Open   [/]=Folder  [►]=Launcher  [S]=PS1  [M]=PSM1  [C/B]=Cmd/Bat  [E]=Exe  "
-        $hintDepth1 = "  ↑↓ Navigate   Enter: Execute/Up   [↑]=Back to Modules   Vault: $RepoOwner/$TargetRepo [$Branch]  "
-        $NavLabel   = New-Object Terminal.Gui.Label($(if ($global:NavDepth -eq 1) { $hintDepth1 } else { $hintDepth0 }))
+        $hintRoot = "  ↑↓ Navigate   Enter: Open   [/]=Folder  [►]=Launcher  [S]=PS1  [M]=PSM1  [C/B]=Cmd/Bat  [E]=Exe  "
+        $hintPath = "  ↑↓ Navigate   Enter: Open/Execute   Top item [↑] goes back   Vault: $RepoOwner/$TargetRepo  "
+        $NavLabel = New-Object Terminal.Gui.Label($(if ($global:NavPath -ne "") { $hintPath } else { $hintRoot }))
         $NavLabel.X           = 0
         $NavLabel.Y           = [Terminal.Gui.Pos]::AnchorEnd(1)
         $NavLabel.Width       = [Terminal.Gui.Dim]::Fill()
