@@ -696,7 +696,11 @@ try {
         # ----------------------------------------------------------------
         # [7] EXECUTION — module Entry.ps1 (root-level launch)
         # ----------------------------------------------------------------
+        $didExecute     = $false
+        $transcriptFile = $null
+
         if ($global:TargetModule) {
+            $didExecute = $true
             Clear-Host
 
             $ExecMode = $global:TargetModeDefault
@@ -743,6 +747,7 @@ try {
         # [8] EXECUTION — specific file inside a folder module
         # ----------------------------------------------------------------
         if ($global:TargetExec) {
+            $didExecute = $true
             Clear-Host
             $item        = $global:TargetExec
             $CacheBuster = [guid]::NewGuid().ToString()
@@ -787,7 +792,7 @@ try {
         }
 
         # Parse transcript into right-pane content for next iteration
-        if (Test-Path $transcriptFile -ErrorAction SilentlyContinue) {
+        if ($transcriptFile -and (Test-Path $transcriptFile -ErrorAction SilentlyContinue)) {
             try {
                 $rawLines = Get-Content $transcriptFile -Encoding UTF8
                 $startIdx = 0
@@ -807,14 +812,17 @@ try {
             Remove-Item $transcriptFile -Force -ErrorAction SilentlyContinue
         }
 
-        Write-Host "`n─────────────────────────────────────────────" -ForegroundColor DarkGray
-        Write-Host "  Press [Enter] to return to the Toolkit..." -ForegroundColor Gray
-        Read-Host | Out-Null
+        if ($didExecute) {
+            Write-Host "`n─────────────────────────────────────────────" -ForegroundColor DarkGray
+            Write-Host "  Press [Enter] to return to the Toolkit..." -ForegroundColor Gray
+            Read-Host | Out-Null
+        }
     }
 
 } catch {
-    Write-Host "`n[!] Master Enclave Crash: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "`n[!] Enclave crash: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    Read-Host "`n  Press [Enter] to close"
 }
 
 Write-Host "`n[+] Toolkit terminated. Returning to prompt." -ForegroundColor Green

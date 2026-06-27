@@ -10,6 +10,7 @@ if %errorlevel% equ 0 (
 ) else (
     powershell -NoProfile -ExecutionPolicy Bypass -Command "$f=[System.IO.File]::ReadAllText('%~f0'); Invoke-Expression $f"
 )
+if %errorlevel% neq 0 pause
 endlocal
 goto:eof
 #>
@@ -38,10 +39,11 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 $Mutex = $null
 
-# --- READ EMBEDDED CONFIG ---
-function Read-ToolkitConfig {
-    if (-not $global:BootstrapSelfPath) { return $null }
-    $lines     = [System.IO.File]::ReadAllLines($global:BootstrapSelfPath, [System.Text.Encoding]::UTF8)
+# --- READ EMBEDDED CONFIG (with fallback to sibling launchers) ---
+function Read-ConfigFromFile {
+    param([string]$FilePath)
+    if (-not $FilePath -or -not (Test-Path $FilePath)) { return $null }
+    $lines     = [System.IO.File]::ReadAllLines($FilePath, [System.Text.Encoding]::UTF8)
     $inBlock   = $false
     $jsonLines = [System.Collections.Generic.List[string]]::new()
     foreach ($line in $lines) {
@@ -51,6 +53,24 @@ function Read-ToolkitConfig {
     }
     $json = ($jsonLines -join "`n").Trim()
     if ($json -and $json -ne '{}') { try { return $json | ConvertFrom-Json } catch { } }
+    return $null
+}
+
+function Read-ToolkitConfig {
+    # 1. Own embedded config
+    $cfg = Read-ConfigFromFile $global:BootstrapSelfPath
+    if ($cfg) { return $cfg }
+
+    # 2. Fallback: Bootstrap.cmd or Start-Toolkit.cmd in the same directory
+    $dir = [System.IO.Path]::GetDirectoryName($global:BootstrapSelfPath)
+    foreach ($name in @('Bootstrap.cmd','Start-Toolkit.cmd')) {
+        $path = Join-Path $dir $name
+        $cfg  = Read-ConfigFromFile $path
+        if ($cfg) {
+            Write-Host "  [i] Config loaded from $name" -ForegroundColor DarkCyan
+            return $cfg
+        }
+    }
     return $null
 }
 
