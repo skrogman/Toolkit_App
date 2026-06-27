@@ -47,19 +47,35 @@ try {
     $TempDir       = Join-Path $env:TEMP "TerminalGui_Standalone_Master"
     $ExtractDir    = Join-Path $TempDir  "Assemblies"
 
-    if (-not (Test-Path $ExtractDir)) {
-        Write-Host "First run — downloading Terminal.Gui framework..." -ForegroundColor Cyan
+    # Check for DLLs specifically — directory existing without DLLs means a failed prior run
+    $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll"       -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    $GuiDll    = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    if (-not $NStackDll -or -not $GuiDll) {
+        Write-Host "  Downloading Terminal.Gui framework..." -ForegroundColor Cyan
         $null = New-Item -Path $ExtractDir -ItemType Directory -Force -ErrorAction SilentlyContinue
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Terminal.Gui/$GuiVersion"    -OutFile "$TempDir\Terminal.Gui.zip"
-        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion" -OutFile "$TempDir\NStack.Core.zip"
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/Terminal.Gui/$GuiVersion"    -OutFile "$TempDir\Terminal.Gui.zip"    -UseBasicParsing
+        Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/NStack.Core/$NStackVersion" -OutFile "$TempDir\NStack.Core.zip"     -UseBasicParsing
         Expand-Archive -Path "$TempDir\Terminal.Gui.zip"    -DestinationPath $ExtractDir -Force
         Expand-Archive -Path "$TempDir\NStack.Core.zip"     -DestinationPath $ExtractDir -Force
+        # Unblock so Windows security doesn't block assembly loading
+        Get-ChildItem -Path $ExtractDir -Filter "*.dll" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { Unblock-File -Path $_.FullName -ErrorAction SilentlyContinue }
+        $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll"       -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $GuiDll    = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
     }
 
-    $NStackDll = Get-ChildItem -Path $ExtractDir -Filter "NStack.dll"       -Recurse | Select-Object -First 1
-    $GuiDll    = Get-ChildItem -Path $ExtractDir -Filter "Terminal.Gui.dll" -Recurse | Select-Object -First 1
+    if (-not $NStackDll -or -not $GuiDll) {
+        throw "Terminal.Gui assemblies not found after download. Check network access to nuget.org."
+    }
+
     try { [System.Reflection.Assembly]::LoadFrom($NStackDll.FullName) | Out-Null } catch { }
     try { [System.Reflection.Assembly]::LoadFrom($GuiDll.FullName)    | Out-Null } catch { }
+
+    if (-not ([System.AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Terminal.Gui' })) {
+        # DLLs may be blocked even after Unblock-File — delete and force re-download next run
+        Remove-Item -Path $ExtractDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Terminal.Gui failed to load from '$($GuiDll.FullName)'. Cached files cleared — re-run to re-download."
+    }
 
     # ----------------------------------------------------------------
     # [2] API + CONTENT CACHE LAYER
