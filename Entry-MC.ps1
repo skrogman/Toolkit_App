@@ -253,13 +253,13 @@ try {
     }
 
     # Remove disabled modules
-    $global:Modules = [System.Collections.Generic.List[hashtable]](
+    $global:Modules = [System.Collections.Generic.List[hashtable]]@(
         $global:Modules | Where-Object { -not $_.Disabled }
     )
 
     # Tag-based access control
     if ($null -ne $AllowedTags) {
-        $global:Modules = [System.Collections.Generic.List[hashtable]](
+        $global:Modules = [System.Collections.Generic.List[hashtable]]@(
             $global:Modules | Where-Object {
                 $modTags = $_.Tags
                 $AllowedTags | Where-Object {
