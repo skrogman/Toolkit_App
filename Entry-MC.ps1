@@ -188,11 +188,9 @@ try {
     $global:Modules = [System.Collections.Generic.List[hashtable]]::new()
 
     try {
-        $RootParams = @{ Uri = "$ApiBase/contents?ref=$Branch"; ErrorAction = "Stop" }
-        if ($AuthHeader) { $RootParams.Headers = $AuthHeader }
-        $global:DirCache[""] = @(Invoke-RestMethod @RootParams)
+        $rootItems = Get-DirListing ""   # populates $global:DirCache[""] via the cache layer
 
-        $Dirs = @($global:DirCache[""] |
+        $Dirs = @($rootItems |
                   Where-Object { $_.type -eq 'dir' -and $_.name -notmatch '^\.' } |
                   Sort-Object name)
 
@@ -275,6 +273,9 @@ try {
         Write-Host "`n[!] No modules loaded." -ForegroundColor Yellow
         Write-Host "    Check PAT scope and repo name. Auth: $(if ($AuthHeader) { 'present' } else { 'NONE' })`n" -ForegroundColor DarkGray
         Start-Sleep -Seconds 4
+    } else {
+        Write-Host "  $($global:Modules.Count) module(s) ready." -ForegroundColor DarkGreen
+        Start-Sleep -Milliseconds 600
     }
 
     # ----------------------------------------------------------------
@@ -341,6 +342,7 @@ try {
         [Environment]::SetEnvironmentVariable("TERM",      $null, "Process")
         [Environment]::SetEnvironmentVariable("COLORTERM", $null, "Process")
 
+        [Console]::Clear()
         [Terminal.Gui.Application]::Init()
         $Top = [Terminal.Gui.Application]::Top
 
