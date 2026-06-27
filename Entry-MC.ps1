@@ -253,20 +253,21 @@ try {
     }
 
     # Remove disabled modules
-    $global:Modules = [System.Collections.Generic.List[hashtable]]@(
-        $global:Modules | Where-Object { -not $_.Disabled }
-    )
+    $_tmp = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($_m in $global:Modules) { if (-not $_m.Disabled) { $_tmp.Add($_m) } }
+    $global:Modules = $_tmp
 
     # Tag-based access control
     if ($null -ne $AllowedTags) {
-        $global:Modules = [System.Collections.Generic.List[hashtable]]@(
-            $global:Modules | Where-Object {
-                $modTags = $_.Tags
-                $AllowedTags | Where-Object {
-                    $pat = $_; $modTags | Where-Object { $_ -like $pat } | Select-Object -First 1
-                } | Select-Object -First 1
-            }
-        )
+        $_tmp2 = [System.Collections.Generic.List[hashtable]]::new()
+        foreach ($_m in $global:Modules) {
+            $modTags = $_m.Tags
+            $match = $AllowedTags | Where-Object {
+                $pat = $_; $modTags | Where-Object { $_ -like $pat } | Select-Object -First 1
+            } | Select-Object -First 1
+            if ($match) { $_tmp2.Add($_m) }
+        }
+        $global:Modules = $_tmp2
         Write-Log "INFO" "Tag filter applied: $($AllowedTags -join ', ') — $($global:Modules.Count) module(s) visible"
     }
 
